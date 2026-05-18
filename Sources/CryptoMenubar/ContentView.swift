@@ -283,7 +283,12 @@ struct ChartSection: View {
     @State private var errorMessage: String? = nil
     @State private var loadTask: Task<Void, Never>? = nil
     @State private var hoverPoint: PricePoint? = nil
+    @State private var xZoom: CGFloat = 1.0           // 1.0 = full range; pinch out to zoom in
+    @State private var zoomAtGestureStart: CGFloat = 1.0
+    @State private var scrollLeadingEdge: Date = .distantPast
     @EnvironmentObject var store: TokenStore
+
+    private static let maxZoom: CGFloat = 30.0       // cap so we don't show <2 points
 
     var body: some View {
         VStack(spacing: 6) {
@@ -331,19 +336,43 @@ struct ChartSection: View {
         .onAppear { loadHistory() }
         .onChange(of: token.id) { _, _ in
             hoverPoint = nil
+            resetZoom()
             loadHistory()
         }
         .onChange(of: timeframe) { _, _ in
             hoverPoint = nil
+            resetZoom()
             loadHistory()
         }
     }
 
-    // Fit the Y-axis to the actual data range with 8% headroom/footroom, instead
-    // of letting Swift Charts default to starting at 0 (which flattens any
-    // intra-range variation for high-priced tokens like BTC).
+    // Length of the visible X window in seconds. zoom=1 shows the full series;
+    // zoom=2 shows half; etc. (Used by .chartXVisibleDomain — Swift Charts'
+    // first-class API for fixed-window panning/zooming. The whole series is
+    // always fed to the chart; only the visible WINDOW changes, so marks never
+    // re-render or fade out during zoom changes.)
+    private var visibleDuration: TimeInterval {
+        guard let first = history.first?.timestamp,
+              let last = history.last?.timestamp,
+              last > first else { return 86400 }
+        return last.timeIntervalSince(first) / Double(xZoom)
+    }
+
+    // Points inside the current visible window. Computed once per body pass
+    // and used only for the Y-axis fit + hover-snap (NOT for the chart's data
+    // — the chart sees all of history).
+    private var visiblePoints: [PricePoint] {
+        guard !history.isEmpty,
+              let last = history.last?.timestamp else { return history }
+        let cutoff = last.addingTimeInterval(-visibleDuration)
+        return history.filter { $0.timestamp >= cutoff }
+    }
+
+    // Fit the Y-axis to the data inside the current X window, with 8% padding.
+    // Recomputes as the user zooms so the chart always uses its full vertical
+    // extent.
     private var yDomain: ClosedRange<Double> {
-        let prices = history.map(\.price)
+        let prices = visiblePoints.map(\.price)
         guard let lo = prices.min(), let hi = prices.max() else { return 0...1 }
         if hi == lo {
             let pad = max(abs(hi) * 0.01, 0.0001)
@@ -353,9 +382,41 @@ struct ChartSection: View {
         return (lo - pad)...(hi + pad)
     }
 
+    private var zoomGesture: some Gesture {
+        MagnifyGesture(minimumScaleDelta: 0)
+            .onChanged { value in
+                let proposed = zoomAtGestureStart * value.magnification
+                let new = max(1.0, min(Self.maxZoom, proposed))
+                withTransaction(Transaction(animation: nil)) {
+                    xZoom = new
+                    reanchorRightEdge()
+                }
+            }
+            .onEnded { _ in
+                zoomAtGestureStart = xZoom
+            }
+    }
+
+    private func resetZoom() {
+        xZoom = 1.0
+        zoomAtGestureStart = 1.0
+        reanchorRightEdge()
+    }
+
+    // Move the scroll window so its TRAILING (right) edge stays pinned to the
+    // most-recent data point. Called whenever zoom or data changes.
+    private func reanchorRightEdge() {
+        guard let last = history.last?.timestamp else { return }
+        scrollLeadingEdge = last.addingTimeInterval(-visibleDuration)
+    }
+
     @ViewBuilder
     private var chartView: some View {
         let domain = yDomain
+        // Feed Chart ALL history; the visible window is controlled below via
+        // chartXVisibleDomain + chartScrollPosition (Swift Charts' first-class
+        // windowing API). This avoids per-frame data mutation during zoom,
+        // which was leaving brief rendering gaps in the curve.
         Chart {
             ForEach(history) { p in
                 // Anchor the area's bottom to the visible domain's lower bound,
@@ -392,16 +453,28 @@ struct ChartSection: View {
                 .foregroundStyle(Color.accentColor)
                 .symbolSize(70)
                 .annotation(
-                    position: .top,
+                    // .automatic lets Swift Charts pick top vs. bottom based on
+                    // where there's room — avoids the leftmost-curve occlusion
+                    // we saw when .top forced the tooltip into the data band.
+                    position: .automatic,
                     alignment: .center,
                     spacing: 6,
-                    overflowResolution: .init(x: .fit(to: .chart), y: .disabled)
+                    overflowResolution: .init(x: .fit(to: .chart), y: .fit(to: .chart))
                 ) {
                     HoverTooltip(point: hp)
                 }
             }
         }
         .chartYScale(domain: domain)
+        // Visible window: only this slice of the X axis is shown at any moment.
+        // The chart still has access to all of history, so marks render once
+        // and aren't dropped/recreated as the window changes.
+        .chartXVisibleDomain(length: visibleDuration)
+        .chartScrollPosition(x: $scrollLeadingEdge)
+        .chartScrollableAxes(.horizontal)
+        // Belt and suspenders: even if the gesture transaction misses a frame,
+        // tell Charts not to animate any state derived from the zoom value.
+        .animation(nil, value: xZoom)
         .chartYAxis {
             // .automatic(desiredCount:) sometimes gives ceil+1 ticks; cap at 4
             // explicitly so labels never get crammed at the top/bottom edges.
@@ -429,6 +502,10 @@ struct ChartSection: View {
                             hoverPoint = nil
                         }
                     }
+                    // Pinch lives INSIDE the overlay's hit area so it competes
+                    // for the same events the overlay rect was eating.
+                    .simultaneousGesture(zoomGesture)
+                    .onTapGesture(count: 2) { resetZoom() }
             }
         }
     }
@@ -455,8 +532,9 @@ struct ChartSection: View {
     }
 
     private func nearest(to date: Date) -> PricePoint? {
-        guard !history.isEmpty else { return nil }
-        return history.min { a, b in
+        let candidates = visiblePoints.isEmpty ? history : visiblePoints
+        guard !candidates.isEmpty else { return nil }
+        return candidates.min { a, b in
             abs(a.timestamp.timeIntervalSince(date)) < abs(b.timestamp.timeIntervalSince(date))
         }
     }
@@ -479,6 +557,9 @@ struct ChartSection: View {
                     history = result.points
                     source = result.source
                     loading = false
+                    // Initial scroll-position anchor — without this the chart
+                    // would render with scrollLeadingEdge still at .distantPast.
+                    reanchorRightEdge()
                 }
             } catch {
                 if Task.isCancelled { return }

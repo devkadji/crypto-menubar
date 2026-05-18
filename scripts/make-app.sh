@@ -12,7 +12,7 @@ APP_NAME="CryptoMenubar"
 APP_DISPLAY_NAME="Crypto Menubar"
 BUNDLE_ID="io.github.devkadji.cryptomenubar"
 VERSION="2.0"
-BUILD="9"
+BUILD="11"
 MIN_MACOS="14.0"
 MODE="${1:-universal}"
 
