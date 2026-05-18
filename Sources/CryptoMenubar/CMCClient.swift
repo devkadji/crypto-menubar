@@ -124,41 +124,7 @@ actor CMCClient {
         }
     }
 
-    // MARK: - Historical OHLCV (requires CMC Standard plan or above)
-
-    func history(id: Int, timeframe: Timeframe) async throws -> [PricePoint] {
-        let data = try await get(
-            "/v2/cryptocurrency/ohlcv/historical",
-            query: [
-                ("id", String(id)),
-                ("time_period", "daily"),
-                ("count", String(timeframe.days)),
-                ("convert", "USD"),
-            ]
-        )
-        struct Response: Decodable {
-            struct Wrap: Decodable {
-                struct Quote: Decodable {
-                    struct USD: Decodable { let close: Double }
-                    let USD: USD
-                }
-                struct Point: Decodable {
-                    let time_close: String
-                    let quote: Quote
-                }
-                let quotes: [Point]
-            }
-            let data: Wrap
-        }
-        do {
-            let r = try JSONDecoder().decode(Response.self, from: data)
-            let iso = ISO8601DateFormatter()
-            return r.data.quotes.compactMap { p in
-                guard let ts = iso.date(from: p.time_close) else { return nil }
-                return PricePoint(timestamp: ts, price: p.quote.USD.close)
-            }
-        } catch {
-            throw CMCError.decoding(error)
-        }
-    }
+    // Note: CMC's historical OHLCV endpoint requires the paid Hobbyist plan.
+    // Removed — we use Binance (primary) and CoinGecko (fallback) for charts.
+    // CMCClient now only serves token search + current quotes (free tier).
 }

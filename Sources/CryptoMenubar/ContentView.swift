@@ -295,8 +295,11 @@ struct ChartSection: View {
                     ForEach(Timeframe.allCases) { Text($0.rawValue).tag($0) }
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 220)
+                // 7 options need more room than the old 4. Push the title to its
+                // own line above (handled by the surrounding HStack collapsing).
+                .frame(minWidth: 280)
                 .labelsHidden()
+                .controlSize(.small)
             }
             .padding(.horizontal, 12)
 

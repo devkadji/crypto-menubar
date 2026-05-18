@@ -27,8 +27,8 @@ actor BinanceClient {
     private let baseURL = URL(string: "https://api.binance.com/api/v3")!
 
     func history(symbol: String, timeframe: Timeframe) async throws -> [PricePoint] {
-        let interval = self.interval(for: timeframe)
-        let limit = self.limit(for: timeframe)
+        let interval = timeframe.binanceInterval
+        let limit = timeframe.binanceLimit
         let pair = "\(symbol.uppercased())USDT"
 
         var comps = URLComponents(
@@ -83,33 +83,15 @@ actor BinanceClient {
             throw BinanceError.decoding(error)
         }
 
-        // Sanity check: if the most-recent candle is older than 48h, the symbol
-        // has likely been delisted from Binance (e.g. XMR was removed in Feb 2024
-        // for compliance reasons, but /klines still returns the last available
+        // Sanity check: if the most-recent candle is older than the timeframe-
+        // specific staleness threshold, the symbol has likely been delisted
+        // (e.g. XMR removed Feb 2024 — /klines still returns the last available
         // data). Treat as "not on Binance" so the caller falls back to CoinGecko.
-        if let last = points.last, Date().timeIntervalSince(last.timestamp) > 48 * 3600 {
+        if let last = points.last,
+           Date().timeIntervalSince(last.timestamp) > timeframe.maxStaleness {
             throw BinanceError.symbolNotFound
         }
         return points
     }
 
-    // Tune interval per timeframe so each chart has 90–180 candles — smooth
-    // line, not too dense.
-    private func interval(for tf: Timeframe) -> String {
-        switch tf {
-        case .d7:   return "1h"
-        case .d30:  return "4h"
-        case .d90:  return "1d"
-        case .d365: return "1d"
-        }
-    }
-
-    private func limit(for tf: Timeframe) -> Int {
-        switch tf {
-        case .d7:   return 168   // 7 × 24h
-        case .d30:  return 180   // 30 × 6 four-hour candles
-        case .d90:  return 90    // daily
-        case .d365: return 365   // daily
-        }
-    }
 }

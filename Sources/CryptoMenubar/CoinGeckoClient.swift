@@ -83,31 +83,43 @@ actor CoinGeckoClient {
         // Fresh cache hit?
         if let entry = historyCache[cacheK],
            Date().timeIntervalSince(entry.fetchedAt) < ttl(for: timeframe) {
-            return entry.points.map { PricePoint(timestamp: $0.timestamp, price: $0.price) }
+            return trim(entry.points.map { PricePoint(timestamp: $0.timestamp, price: $0.price) },
+                        to: timeframe.trimToHours)
         }
 
+        let daysParam = timeframe.coinGeckoDaysParam
         do {
             let id = idCache[slug] ?? slug
             do {
-                let points = try await marketChart(id: id, days: timeframe.days)
+                let points = try await marketChart(id: id, daysParam: daysParam)
                 if idCache[slug] == nil { idCache[slug] = slug }
-                return store(cacheK: cacheK, points: points)
+                return trim(store(cacheK: cacheK, points: points), to: timeframe.trimToHours)
             } catch CoinGeckoError.http(404, _) {
                 // Slug doesn't map directly — resolve via search
                 guard let resolved = try await searchForId(symbol: symbol) else {
                     throw CoinGeckoError.notFound
                 }
                 idCache[slug] = resolved
-                let points = try await marketChart(id: resolved, days: timeframe.days)
-                return store(cacheK: cacheK, points: points)
+                let points = try await marketChart(id: resolved, daysParam: daysParam)
+                return trim(store(cacheK: cacheK, points: points), to: timeframe.trimToHours)
             }
         } catch CoinGeckoError.http(429, _) {
             // Rate limited — serve whatever we have, even if stale; only error if no cache at all.
             if let entry = historyCache[cacheK] {
-                return entry.points.map { PricePoint(timestamp: $0.timestamp, price: $0.price) }
+                return trim(entry.points.map { PricePoint(timestamp: $0.timestamp, price: $0.price) },
+                            to: timeframe.trimToHours)
             }
             throw CoinGeckoError.http(429, "rate limit")
         }
+    }
+
+    // Slice the trailing N hours off the full series — CoinGecko's free API
+    // has no sub-day granularity param, so for 1H we ask for days=1 and trim.
+    private func trim(_ points: [PricePoint], to lastHours: Int?) -> [PricePoint] {
+        guard let h = lastHours else { return points }
+        let cutoff = Date().addingTimeInterval(-Double(h) * 3600)
+        let trimmed = points.filter { $0.timestamp >= cutoff }
+        return trimmed.isEmpty ? points : trimmed
     }
 
     // MARK: - Cache helpers
@@ -117,10 +129,13 @@ actor CoinGeckoClient {
     private func ttl(for tf: Timeframe) -> TimeInterval {
         // Shorter timeframes need fresher data because the last bar moves more often.
         switch tf {
+        case .h1:   return 60              // 1 min
+        case .h24:  return 5 * 60
         case .d7:   return 5 * 60
         case .d30:  return 15 * 60
         case .d90:  return 30 * 60
         case .d365: return 60 * 60
+        case .all:  return 24 * 3600       // all-time histories change slowly
         }
     }
 
@@ -134,14 +149,26 @@ actor CoinGeckoClient {
 
     // MARK: - HTTP
 
-    private func marketChart(id: String, days: Int) async throws -> [PricePoint] {
+    private func marketChart(id: String, daysParam: String) async throws -> [PricePoint] {
+        do {
+            return try await rawMarketChart(id: id, daysParam: daysParam)
+        } catch CoinGeckoError.http(let code, let body) where daysParam == "max"
+            && (code == 401 || code == 400)
+            && body.contains("10012") {
+            // Free / Demo tier caps historical at 365 days. Quietly degrade
+            // "ALL" to "1Y" rather than failing the chart entirely.
+            return try await rawMarketChart(id: id, daysParam: "365")
+        }
+    }
+
+    private func rawMarketChart(id: String, daysParam: String) async throws -> [PricePoint] {
         var comps = URLComponents(
             url: baseURL.appendingPathComponent("coins/\(id)/market_chart"),
             resolvingAgainstBaseURL: false
         )!
         comps.queryItems = [
             URLQueryItem(name: "vs_currency", value: "usd"),
-            URLQueryItem(name: "days", value: String(days)),
+            URLQueryItem(name: "days", value: daysParam),
         ]
         let req = makeRequest(url: comps.url!)
         await awaitSlot()
