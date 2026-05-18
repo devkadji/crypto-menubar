@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# CryptoMenubar installer for friends.
+# Double-click in Finder, or run with `bash install.command`.
+#
+# It will:
+#   1. Move CryptoMenubar.app to /Applications (replacing any older copy)
+#   2. Remove the macOS quarantine flag so Gatekeeper stops complaining
+#   3. Launch the app (look for the ₿ icon in your menubar)
+
+set -euo pipefail
+cd "$(dirname "$0")"
+
+APP="CryptoMenubar.app"
+DEST="/Applications/${APP}"
+
+echo "──────────────────────────────────────────────────"
+echo "  CryptoMenubar installer"
+echo "──────────────────────────────────────────────────"
+echo
+
+if [[ ! -d "$APP" ]]; then
+    echo "❌ ${APP} not found in this folder."
+    echo "   Make sure install.command sits next to the .app, then re-run."
+    read -n1 -s -p "Press any key to close..." ; echo
+    exit 1
+fi
+
+if [[ -d "$DEST" ]]; then
+    echo "↻ Removing existing install at ${DEST}"
+    rm -rf "$DEST"
+fi
+
+echo "↳ Copying to /Applications…"
+cp -R "$APP" "$DEST"
+
+echo "↳ Removing quarantine flag (no more Gatekeeper warnings)…"
+xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
+
+echo "↳ Launching…"
+open "$DEST"
+
+echo
+echo "✅ Done. Look for the ₿ icon in your menubar (top right of screen)."
+echo
+echo "First-run setup:"
+echo "  Click the menubar icon → ⚙ Settings → paste a free CoinMarketCap key."
+echo "  Get one at https://coinmarketcap.com/api (~1 minute, no credit card)."
+echo
+read -n1 -s -p "Press any key to close this window..."
+echo
