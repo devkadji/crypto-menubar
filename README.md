@@ -101,7 +101,7 @@ crypto-menubar/
 
 ## Persistence
 
-State lives in `UserDefaults` under bundle id `com.deosax.cryptomenubar`:
+State lives in `UserDefaults` under bundle id `io.github.devkadji.cryptomenubar`:
 
 | Key | What |
 |---|---|

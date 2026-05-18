@@ -10,7 +10,7 @@ cd "$(dirname "$0")/.."
 
 APP_NAME="CryptoMenubar"
 APP_DISPLAY_NAME="Crypto Menubar"
-BUNDLE_ID="com.deosax.cryptomenubar"
+BUNDLE_ID="io.github.devkadji.cryptomenubar"
 VERSION="1.4"
 BUILD="5"
 MIN_MACOS="14.0"
