@@ -1,5 +1,6 @@
 import SwiftUI
 import Charts
+import AppKit
 
 struct ContentView: View {
     @EnvironmentObject var store: TokenStore
@@ -286,6 +287,10 @@ struct ChartSection: View {
     @State private var xZoom: CGFloat = 1.0           // 1.0 = full range; pinch out to zoom in
     @State private var zoomAtGestureStart: CGFloat = 1.0
     @State private var scrollLeadingEdge: Date = .distantPast
+    @State private var isChartHovered = false         // cursor currently over this chart
+    @State private var scrollMonitor: Any? = nil      // NSEvent monitor for Option+scroll zoom
+    @State private var autoRefreshTask: Task<Void, Never>? = nil
+    @State private var lastFetchedAt: Date? = nil     // when history was last pulled
     @EnvironmentObject var store: TokenStore
 
     private static let maxZoom: CGFloat = 30.0       // cap so we don't show <2 points
@@ -327,13 +332,23 @@ struct ChartSection: View {
             }
             .frame(height: 150)
 
-            // Source + last-data timestamp caption — lets you see at a glance
-            // which provider served this chart and how fresh the data is.
+            // Source + freshness caption — shows which provider served this
+            // chart and when it was last polled.
             if let source = source, let last = history.last {
-                sourceCaption(source: source, last: last.timestamp)
+                sourceCaption(source: source, last: last.timestamp, fetchedAt: lastFetchedAt)
             }
         }
-        .onAppear { loadHistory() }
+        .onAppear {
+            loadHistory()
+            installScrollZoomMonitor()
+            startAutoRefresh()
+        }
+        .onDisappear {
+            if let m = scrollMonitor { NSEvent.removeMonitor(m) }
+            scrollMonitor = nil
+            autoRefreshTask?.cancel()
+            autoRefreshTask = nil
+        }
         .onChange(of: token.id) { _, _ in
             hoverPoint = nil
             resetZoom()
@@ -343,6 +358,71 @@ struct ChartSection: View {
             hoverPoint = nil
             resetZoom()
             loadHistory()
+        }
+    }
+
+    // Self-contained refresh loop — re-fetches this chart's history every
+    // `refreshIntervalSeconds`, independent of the store's quote-refresh cycle.
+    // Runs only while the chart is expanded (started in onAppear, cancelled in
+    // onDisappear).
+    private func startAutoRefresh() {
+        autoRefreshTask?.cancel()
+        autoRefreshTask = Task { @MainActor in
+            while !Task.isCancelled {
+                let interval = store.refreshIntervalSeconds
+                try? await Task.sleep(for: .seconds(interval))
+                if Task.isCancelled { return }
+                await silentReload()
+            }
+        }
+    }
+
+    // Re-fetch without the loading spinner or a zoom reset — the chart just
+    // swaps in fresh data. On failure the existing chart stays untouched.
+    @MainActor
+    private func silentReload() async {
+        let tf = timeframe
+        guard let result = try? await store.history(for: token, timeframe: tf) else { return }
+        guard tf == timeframe else { return }   // user switched away mid-fetch
+        history = result.points
+        source = result.source
+        lastFetchedAt = Date()
+        reanchorRightEdge()
+    }
+
+    // Mouse users have no pinch gesture — let Option+scroll-wheel zoom instead.
+    // A local NSEvent monitor observes scroll events without sitting in the
+    // hit-test path (so it doesn't block the hover tooltip). It only acts when
+    // Option is held and the cursor is over THIS chart.
+    private func installScrollZoomMonitor() {
+        guard scrollMonitor == nil else { return }
+        let hovered = $isChartHovered
+        let zoom = $xZoom
+        let zoomStart = $zoomAtGestureStart
+        let scroll = $scrollLeadingEdge
+        let hist = $history
+        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+            // Mouse wheel only (trackpad has pinch); Option held; over this chart.
+            guard event.modifierFlags.contains(.option),
+                  !event.hasPreciseScrollingDeltas,
+                  hovered.wrappedValue else {
+                return event
+            }
+            let delta = event.scrollingDeltaY
+            guard delta != 0 else { return nil }
+            // Scroll up → zoom in. Clamp per-event delta so one notch is gentle.
+            let clamped = min(max(delta, -3), 3)
+            let factor = 1.0 + clamped * 0.08
+            let newZoom = max(1.0, min(Self.maxZoom, zoom.wrappedValue * factor))
+            zoom.wrappedValue = newZoom
+            zoomStart.wrappedValue = newZoom
+            // Re-anchor the visible window's right edge to the latest point.
+            let h = hist.wrappedValue
+            if let first = h.first?.timestamp, let last = h.last?.timestamp, last > first {
+                let visible = last.timeIntervalSince(first) / Double(newZoom)
+                scroll.wrappedValue = last.addingTimeInterval(-visible)
+            }
+            return nil   // consume — don't let the list scroll
         }
     }
 
@@ -492,6 +572,7 @@ struct ChartSection: View {
                     .onContinuousHover { phase in
                         switch phase {
                         case .active(let location):
+                            isChartHovered = true
                             guard let plotFrame = proxy.plotFrame else { return }
                             let origin = geo[plotFrame].origin
                             let xInPlot = location.x - origin.x
@@ -499,6 +580,7 @@ struct ChartSection: View {
                                 hoverPoint = nearest(to: date)
                             }
                         case .ended:
+                            isChartHovered = false
                             hoverPoint = nil
                         }
                     }
@@ -511,18 +593,22 @@ struct ChartSection: View {
     }
 
     @ViewBuilder
-    private func sourceCaption(source: ChartSource, last: Date) -> some View {
-        // Freshness color: green ≤2h, yellow ≤24h, red >24h. RWA/delisted
-        // tokens will show CoinGecko + a recent timestamp; tokens with truly
-        // stale upstream data will get a visible warning.
+    private func sourceCaption(source: ChartSource, last: Date, fetchedAt: Date?) -> some View {
+        // Dot color reflects how fresh the most-recent data point is:
+        // green ≤2h, yellow ≤24h, red >24h.
         let age = Date().timeIntervalSince(last)
         let color: Color = age <= 2 * 3600 ? .green
             : (age <= 24 * 3600 ? .yellow : .red)
+        // "↻ HH:mm" is when we last polled — advances every refresh interval,
+        // so it's a visible confirmation the chart is auto-updating.
+        let updated = fetchedAt.map {
+            "↻ " + $0.formatted(.dateTime.hour().minute())
+        } ?? ""
         HStack(spacing: 6) {
             Circle()
                 .fill(color)
                 .frame(width: 6, height: 6)
-            Text("via \(source.label) · last: \(last.formatted(.dateTime.month(.abbreviated).day().hour().minute()))")
+            Text("via \(source.label) · \(updated)")
                 .font(.caption2.monospaced())
                 .foregroundColor(.secondary)
             Spacer()
@@ -556,6 +642,7 @@ struct ChartSection: View {
                 await MainActor.run {
                     history = result.points
                     source = result.source
+                    lastFetchedAt = Date()
                     loading = false
                     // Initial scroll-position anchor — without this the chart
                     // would render with scrollLeadingEdge still at .distantPast.
