@@ -287,6 +287,13 @@ struct ChartSection: View {
     @State private var xZoom: CGFloat = 1.0           // 1.0 = full range; pinch out to zoom in
     @State private var zoomAtGestureStart: CGFloat = 1.0
     @State private var scrollLeadingEdge: Date = .distantPast
+    // Pinch-zoom anchor — the date under the cursor at gesture start. The
+    // visible window slides during zoom so this date stays at the same
+    // fractional position across the plot width.
+    @State private var zoomAnchorDate: Date? = nil
+    @State private var zoomAnchorFraction: Double = 0.5
+    // Drag-to-pan state — captured at gesture start so we pan relative to it.
+    @State private var panStartLeadingEdge: Date? = nil
     @State private var isChartHovered = false         // cursor currently over this chart
     @State private var scrollMonitor: Any? = nil      // NSEvent monitor for Option+scroll zoom
     @State private var autoRefreshTask: Task<Void, Never>? = nil
@@ -438,14 +445,20 @@ struct ChartSection: View {
         return last.timeIntervalSince(first) / Double(xZoom)
     }
 
-    // Points inside the current visible window. Computed once per body pass
-    // and used only for the Y-axis fit + hover-snap (NOT for the chart's data
-    // — the chart sees all of history).
+    // Points inside the ACTUAL visible window [scrollLeadingEdge, +visibleDuration].
+    // Used by yDomain (Y-axis fit) and nearest() (hover-snap). Previously this
+    // anchored to the right edge of the data — which broke after panning, because
+    // yDomain/hover were looking at the rightmost candles instead of the ones
+    // actually drawn on screen.
     private var visiblePoints: [PricePoint] {
-        guard !history.isEmpty,
-              let last = history.last?.timestamp else { return history }
-        let cutoff = last.addingTimeInterval(-visibleDuration)
-        return history.filter { $0.timestamp >= cutoff }
+        guard !history.isEmpty else { return history }
+        let start = scrollLeadingEdge
+        let end = start.addingTimeInterval(visibleDuration)
+        let inWindow = history.filter { $0.timestamp >= start && $0.timestamp <= end }
+        // Defensive fallback: if scrollLeadingEdge is still .distantPast (i.e.
+        // the chart hasn't been anchored yet, e.g. mid-load), return everything
+        // so yDomain doesn't degenerate to 0…1.
+        return inWindow.isEmpty ? history : inWindow
     }
 
     // Fit the Y-axis to the data inside the current X window, with 8% padding.
@@ -465,26 +478,92 @@ struct ChartSection: View {
     private var zoomGesture: some Gesture {
         MagnifyGesture(minimumScaleDelta: 0)
             .onChanged { value in
+                // First frame of this gesture: capture the date the cursor is
+                // over as the zoom anchor (from the hover state we already track).
+                if zoomAnchorDate == nil, let hp = hoverPoint,
+                   let first = history.first?.timestamp,
+                   let last = history.last?.timestamp,
+                   last > first {
+                    let total = last.timeIntervalSince(first)
+                    let curVisible = total / Double(xZoom)
+                    let pos = hp.timestamp.timeIntervalSince(scrollLeadingEdge) / curVisible
+                    zoomAnchorDate = hp.timestamp
+                    zoomAnchorFraction = max(0, min(1, pos))
+                }
                 let proposed = zoomAtGestureStart * value.magnification
                 let new = max(1.0, min(Self.maxZoom, proposed))
                 withTransaction(Transaction(animation: nil)) {
                     xZoom = new
-                    reanchorRightEdge()
+                    repositionForZoom()
                 }
             }
             .onEnded { _ in
                 zoomAtGestureStart = xZoom
+                zoomAnchorDate = nil
+            }
+    }
+
+    // DragGesture for panning the visible window. Defined inside chartOverlay
+    // so the closure can capture `plotWidth` (which we need to convert pixel
+    // drag → time). Three-finger trackpad drag (via macOS Accessibility) is
+    // delivered as a regular click-and-drag and triggers this too.
+    private func panGesture(plotWidth: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 4)
+            .onChanged { value in
+                if panStartLeadingEdge == nil {
+                    panStartLeadingEdge = scrollLeadingEdge
+                }
+                guard plotWidth > 0,
+                      let start = panStartLeadingEdge else { return }
+                // translation.width > 0 (drag right) → visible window shifts
+                // LEFT in time (earlier data appears).
+                let secPerPoint = visibleDuration / Double(plotWidth)
+                let deltaSec = -Double(value.translation.width) * secPerPoint
+                var newLE = start.addingTimeInterval(deltaSec)
+                if let first = history.first?.timestamp,
+                   let last = history.last?.timestamp {
+                    if newLE < first { newLE = first }
+                    let maxLE = last.addingTimeInterval(-visibleDuration)
+                    if newLE > maxLE { newLE = maxLE }
+                }
+                withTransaction(Transaction(animation: nil)) {
+                    scrollLeadingEdge = newLE
+                }
+            }
+            .onEnded { _ in
+                panStartLeadingEdge = nil
             }
     }
 
     private func resetZoom() {
         xZoom = 1.0
         zoomAtGestureStart = 1.0
+        zoomAnchorDate = nil
         reanchorRightEdge()
     }
 
-    // Move the scroll window so its TRAILING (right) edge stays pinned to the
-    // most-recent data point. Called whenever zoom or data changes.
+    // Reposition during zoom: keep the cursor's anchor date at the same
+    // fractional X position. Falls back to right-edge anchor when no cursor
+    // anchor was captured (e.g. scroll-wheel zoom with no hover).
+    private func repositionForZoom() {
+        guard let first = history.first?.timestamp,
+              let last = history.last?.timestamp,
+              last > first else { return }
+        let total = last.timeIntervalSince(first)
+        let newVisible = total / Double(xZoom)
+
+        if let anchor = zoomAnchorDate {
+            var newLE = anchor.addingTimeInterval(-zoomAnchorFraction * newVisible)
+            if newLE < first { newLE = first }
+            let maxLE = last.addingTimeInterval(-newVisible)
+            if newLE > maxLE { newLE = maxLE }
+            scrollLeadingEdge = newLE
+        } else {
+            scrollLeadingEdge = last.addingTimeInterval(-newVisible)
+        }
+    }
+
+    // Right-edge anchor — only used on initial load + manual zoom reset now.
     private func reanchorRightEdge() {
         guard let last = history.last?.timestamp else { return }
         scrollLeadingEdge = last.addingTimeInterval(-visibleDuration)
@@ -587,6 +666,12 @@ struct ChartSection: View {
                     // Pinch lives INSIDE the overlay's hit area so it competes
                     // for the same events the overlay rect was eating.
                     .simultaneousGesture(zoomGesture)
+                    // Drag-to-pan. Uses the plot width from the proxy to map
+                    // pixel drag → time. Triggers on three-finger drag too
+                    // (macOS Accessibility delivers it as a normal click-drag).
+                    .gesture(
+                        panGesture(plotWidth: (proxy.plotFrame.map { geo[$0].width } ?? 0))
+                    )
                     .onTapGesture(count: 2) { resetZoom() }
             }
         }

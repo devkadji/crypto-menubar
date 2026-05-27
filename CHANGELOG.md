@@ -1,5 +1,20 @@
 # Changelog
 
+## v2.2 — 2026-05-27
+
+- **Cursor-anchored pinch zoom.** Pinching now keeps the date under the cursor
+  in place — content expands or contracts symmetrically around that point —
+  instead of always anchoring to the right edge of the chart.
+- **Drag-to-pan within zoomed charts.** Click-and-drag (or three-finger drag
+  via macOS Accessibility) horizontally on any chart pans the visible window.
+  Movement is clamped at the data boundaries. The chart no longer accidentally
+  drags the whole popover window when you grab it — window movement is now
+  only via the titlebar strip at the top.
+- **Y-axis fit + hover snap follow the visible window.** Previously, when you
+  panned left into older data, the Y-axis kept its scale based on the rightmost
+  candles (so the curve clipped) and the hover tooltip silently failed for
+  cursor positions outside that range. Both now track exactly what's drawn.
+
 ## v2.1 — 2026-05-20
 
 - **Charts auto-refresh.** Each expanded chart now re-fetches its history on the

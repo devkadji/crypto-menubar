@@ -130,7 +130,11 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         win.titleVisibility = .hidden
         win.standardWindowButton(.miniaturizeButton)?.isHidden = true
         win.standardWindowButton(.zoomButton)?.isHidden = true
-        win.isMovableByWindowBackground = true
+        // Don't move the window when the user drags inside a chart — that
+        // would compete with the chart's own pan gesture. The titlebar strip
+        // (top ~22pt, where the close button lives) is still a drag zone
+        // automatically thanks to the .titled styleMask.
+        win.isMovableByWindowBackground = false
         win.isReleasedWhenClosed = false
         win.minSize = NSSize(width: 320, height: 240)
         win.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
