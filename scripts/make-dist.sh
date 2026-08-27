@@ -11,7 +11,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-VERSION="2.3"
+VERSION="2.4"
 DIST_NAME="CryptoMenubar-${VERSION}"
 DIST_DIR="dist/${DIST_NAME}"
 
@@ -78,6 +78,10 @@ USING IT
 - Hover the chart to see exact price + date.
 - Click the 🔔 bell on any row to set price alerts (above / below).
   When the price crosses a threshold, you get a macOS notification.
+- Drag rows to rearrange them, or use the up/down-arrows button to sort
+  by name, symbol, price or % change. The menubar shows the top token.
+- Windows fit their content. Drag one shorter and it stays that size
+  (the list scrolls); drag it to full height to go back to auto-fit.
 - Click the pie-chart button for the Portfolio tracker: add tokens by
   ticker, enter how much you hold, and see total value + charts.
   Holdings are stored encrypted on your Mac (key in your login

@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 // Portfolio tracker window: total value + change over the selected timeframe,
 // a value-over-time chart, a ticker search to add holdings, and the holdings
@@ -8,6 +9,7 @@ import AppKit
 struct PortfolioView: View {
     @EnvironmentObject var store: TokenStore
     @EnvironmentObject var portfolio: PortfolioStore
+    @State private var draggingId: Int? = nil      // holding being drag-reordered
 
     var body: some View {
         VStack(spacing: 0) {
@@ -22,64 +24,83 @@ struct PortfolioView: View {
                 loadedBody
             }
         }
-        .frame(minWidth: 520, minHeight: 520)
+        .frame(minWidth: 520)
         .background(Color(NSColor.windowBackgroundColor))
+        // Window height follows these (see StatusBarController.fitPortfolioWindow).
+        .onPreferenceChange(ChromeHeightKey.self) { portfolio.measuredChromeHeight = $0 }
+        .onPreferenceChange(ListHeightKey.self) { portfolio.measuredListHeight = $0 }
     }
 
     // MARK: - Main layout
 
     @ViewBuilder
     private var loadedBody: some View {
-        PortfolioHeader()
-        Divider()
-
-        if store.apiKey.isEmpty {
-            Text("Set your CoinMarketCap API key in the main window's Settings to search tokens and get live prices.")
-                .font(.caption).foregroundColor(.orange)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(12)
-        } else {
-            AddTokenView(
-                placeholder: "Add token to portfolio by ticker (e.g. ETH, SOL)",
-                onSelect: { portfolio.add($0) }
-            )
-            .padding(.vertical, 6)
-        }
-        Divider()
-
-        PortfolioChart()
-        Divider()
-
-        if let err = portfolio.persistError {
-            Text("⚠️ Could not save portfolio: \(err)")
-                .font(.caption).foregroundColor(.orange)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 12).padding(.vertical, 6)
+        // Chrome: everything above the scrollable holdings list. Measured so
+        // the window can be sized to chrome + list exactly.
+        VStack(spacing: 0) {
+            PortfolioHeader()
             Divider()
+
+            if store.apiKey.isEmpty {
+                Text("Set your CoinMarketCap API key in the main window's Settings to search tokens and get live prices.")
+                    .font(.caption).foregroundColor(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(12)
+            } else {
+                AddTokenView(
+                    placeholder: "Add token to portfolio by ticker (e.g. ETH, SOL)",
+                    onSelect: { portfolio.add($0) }
+                )
+                .padding(.vertical, 6)
+            }
+            Divider()
+
+            PortfolioChart()
+            Divider()
+
+            if let err = portfolio.persistError {
+                Text("⚠️ Could not save portfolio: \(err)")
+                    .font(.caption).foregroundColor(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 12).padding(.vertical, 6)
+                Divider()
+            }
         }
+        .background(GeometryReader { geo in
+            Color.clear.preference(key: ChromeHeightKey.self, value: geo.size.height)
+        })
 
         ScrollView {
-            if portfolio.holdings.isEmpty {
-                VStack(spacing: 6) {
-                    Image(systemName: "chart.pie")
-                        .font(.system(size: 28)).foregroundColor(.secondary)
-                    Text("No holdings yet")
-                        .font(.subheadline).bold()
-                    Text("Search a ticker above, then enter how much you hold. Amounts are stored encrypted on this Mac (key in your login Keychain).")
-                        .font(.caption).foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(24)
-            } else {
-                VStack(spacing: 0) {
-                    ForEach(portfolio.holdings) { holding in
-                        HoldingRow(holding: holding)
-                        Divider().padding(.leading, 12)
+            Group {
+                if portfolio.holdings.isEmpty {
+                    VStack(spacing: 6) {
+                        Image(systemName: "chart.pie")
+                            .font(.system(size: 28)).foregroundColor(.secondary)
+                        Text("No holdings yet")
+                            .font(.subheadline).bold()
+                        Text("Search a ticker above, then enter how much you hold. Amounts are stored encrypted on this Mac (key in your login Keychain).")
+                            .font(.caption).foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
+                    .frame(maxWidth: .infinity)
+                    .padding(24)
+                } else {
+                    VStack(spacing: 0) {
+                        ForEach(portfolio.displayedHoldings) { holding in
+                            HoldingRow(holding: holding, draggingId: $draggingId)
+                            Divider().padding(.leading, 12)
+                        }
+                    }
+                    .onDrop(of: [.text], isTargeted: nil) { _ in draggingId = nil; return true }
                 }
             }
+            // Lay the list out at its natural height so the GeometryReader
+            // reports the true content height (not the visible bounds).
+            .fixedSize(horizontal: false, vertical: true)
+            .background(GeometryReader { geo in
+                Color.clear.preference(key: ListHeightKey.self, value: geo.size.height)
+            })
         }
         .frame(maxHeight: .infinity)
     }
@@ -139,6 +160,9 @@ struct PortfolioHeader: View {
             }
             Spacer()
             HStack(spacing: 10) {
+                SortMenu(selection: $portfolio.sortOrder,
+                         options: [.manual, .name, .symbol, .value, .price, .change])
+
                 Button {
                     portfolio.hideValues.toggle()
                 } label: {
@@ -280,6 +304,7 @@ struct PortfolioChart: View {
 
 struct HoldingRow: View {
     let holding: Holding
+    @Binding var draggingId: Int?
     @EnvironmentObject var store: TokenStore
     @EnvironmentObject var portfolio: PortfolioStore
 
@@ -355,10 +380,18 @@ struct HoldingRow: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             .contentShape(Rectangle())
+            // Grab the row anywhere outside the amount field to rearrange.
+            .reorderable(id: holding.id, draggingId: $draggingId) { dragged, onto in
+                portfolio.moveHolding(id: dragged, before: onto)
+            }
             .contextMenu {
                 Button(isExpanded ? "Collapse chart" : "Expand chart") {
                     portfolio.toggleExpanded(holding.id)
                 }
+                Divider()
+                Button("Move to top") { moveToEdge(top: true) }
+                Button("Move to bottom") { moveToEdge(top: false) }
+                Divider()
                 if !store.tokens.contains(where: { $0.id == holding.id }) {
                     Button("Add to watchlist") { store.add(holding.token) }
                 }
@@ -371,8 +404,17 @@ struct HoldingRow: View {
                 HoldingChart(holding: holding)
                     .padding(.vertical, 4)
                     .background(Color.gray.opacity(0.04))
+                    .onDrop(of: [.text], delegate: ReorderDropDelegate(
+                        rowId: holding.id, draggingId: $draggingId,
+                        move: { portfolio.moveHolding(id: $0, before: $1) }))
             }
         }
+    }
+
+    private func moveToEdge(top: Bool) {
+        let shown = portfolio.displayedHoldings
+        guard let edge = top ? shown.first : shown.last, edge.id != holding.id else { return }
+        portfolio.moveHolding(id: holding.id, before: edge.id)
     }
 }
 

@@ -24,6 +24,24 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     // setFrameAutosaveName, which would also save/restore height and race with
     // our fit logic.)
     private static let widthKey = "CryptoMenubarMainWindow.width.v1"
+    // Height the user last dragged the window to, when SHORTER than its
+    // content. Acts as a persistent cap: content changes still auto-fit, but
+    // never beyond this. Dragging the window to (or past) its full content
+    // height clears the cap and hands control back to auto-fit.
+    private static let maxHeightKey = "CryptoMenubarMainWindow.maxHeight.v1"
+    private static let portfolioMaxHeightKey = "CryptoMenubarPortfolioWindow.maxHeight.v1"
+    private var userMaxHeight: CGFloat? {
+        get { Self.readCap(Self.maxHeightKey) }
+        set { UserDefaults.standard.set(Double(newValue ?? 0), forKey: Self.maxHeightKey) }
+    }
+    private var portfolioUserMaxHeight: CGFloat? {
+        get { Self.readCap(Self.portfolioMaxHeightKey) }
+        set { UserDefaults.standard.set(Double(newValue ?? 0), forKey: Self.portfolioMaxHeightKey) }
+    }
+    private static func readCap(_ key: String) -> CGFloat? {
+        let v = UserDefaults.standard.double(forKey: key)
+        return v >= 240 ? v : nil
+    }
 
     init(store: TokenStore) {
         self.store = store
@@ -31,6 +49,7 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         super.init()
         setupStatusItem()
         observeStore()
+        observePortfolio()
         // Close the popover-like window whenever the user switches to another app.
         NotificationCenter.default.addObserver(
             self,
@@ -61,6 +80,7 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         store.portfolio.windowOpened()
         win.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        DispatchQueue.main.async { [weak self] in self?.fitPortfolioWindowToContent() }
     }
 
     private func makePortfolioWindow() -> NSWindow {
@@ -72,13 +92,16 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         )
         win.title = "Portfolio"
         win.isReleasedWhenClosed = false
-        win.minSize = NSSize(width: 520, height: 520)
+        win.minSize = NSSize(width: 520, height: 360)
         win.collectionBehavior = [.fullScreenAuxiliary]
         let hosting = NSHostingController(
             rootView: PortfolioView()
                 .environmentObject(store)
                 .environmentObject(store.portfolio)
         )
+        // Height is fitted to content by us (see fitPortfolioWindowToContent);
+        // don't let SwiftUI impose its own size on the window.
+        hosting.sizingOptions = []
         win.contentViewController = hosting
         win.delegate = self
         // AppKit remembers size + position between launches; first launch centers.
@@ -124,27 +147,82 @@ final class StatusBarController: NSObject, NSWindowDelegate {
             .store(in: &cancellables)
     }
 
+    // MARK: - Portfolio window fit (same rules as the main window)
+
+    private func observePortfolio() {
+        store.portfolio.$measuredChromeHeight
+            .combineLatest(store.portfolio.$measuredListHeight)
+            .removeDuplicates { $0.0 == $1.0 && $0.1 == $1.1 }
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _, _ in
+                self?.fitPortfolioWindowToContent()
+            }
+            .store(in: &cancellables)
+    }
+
+    /// Content height the portfolio needs (nil until SwiftUI has measured).
+    private var portfolioContentHeight: CGFloat? {
+        let c = store.portfolio.measuredChromeHeight
+        let l = store.portfolio.measuredListHeight
+        return (c > 0 && l > 0) ? c + l : nil
+    }
+
+    /// Frame height the portfolio window needs: content + real titlebar.
+    private func portfolioNeededFrameHeight(_ win: NSWindow) -> CGFloat? {
+        guard let content = portfolioContentHeight else { return nil }
+        let titlebar = win.frame.height - win.contentRect(forFrameRect: win.frame).height
+        return content + titlebar
+    }
+
+    private func fitPortfolioWindowToContent() {
+        guard let win = portfolioWindow, let needed = portfolioNeededFrameHeight(win) else { return }
+        var targetH = min(needed, maxAvailableHeight(win))
+        if let cap = portfolioUserMaxHeight { targetH = min(targetH, cap) }
+        targetH = max(targetH, win.minSize.height)
+
+        let currentTop = win.frame.maxY
+        guard abs(targetH - win.frame.height) > 1 else { return }
+        var frame = win.frame
+        frame.size.height = targetH
+        frame.origin.y = currentTop - targetH
+        win.setFrame(frame, display: true, animate: false)
+    }
+
+    /// Natural content height (measured by SwiftUI once rendered, estimated
+    /// from constants before the first frame).
+    private var contentHeight: CGFloat {
+        let chrome = store.measuredChromeHeight
+        let list = store.measuredListHeight
+        return (chrome > 0 && list > 0) ? chrome + list : computeIntendedHeight()
+    }
+
+    /// Screen the window's TOP edge is on. `window.screen` picks the screen
+    /// with the largest overlap, which can be the wrong one on multi-display
+    /// setups when the window is tall — then the bottom cap comes from a
+    /// taller screen and the window runs off the real screen's bottom edge.
+    private func screenForFit(_ window: NSWindow) -> NSScreen? {
+        let topCenter = NSPoint(x: window.frame.midX, y: window.frame.maxY - 1)
+        return NSScreen.screens.first { $0.frame.contains(topCenter) }
+            ?? window.screen ?? NSScreen.main ?? NSScreen.screens.first
+    }
+
+    /// Largest height the window may have without leaving the screen: from
+    /// its current top edge down to the bottom of the visible area (above
+    /// the Dock).
+    private func maxAvailableHeight(_ window: NSWindow) -> CGFloat {
+        let currentTop = window.frame.maxY
+        let bottomLimit = (screenForFit(window)?.visibleFrame.minY ?? 0) + 8
+        return max(window.minSize.height, currentTop - bottomLimit)
+    }
+
     private func fitWindowHeightToContent() {
         guard let window = window else { return }
-        // Use measured heights when available (SwiftUI has rendered at least
-        // once). Fall back to constant estimates pre-render (very first frame).
-        let measuredChrome = store.measuredChromeHeight
-        let measuredList = store.measuredListHeight
-        let intended: CGFloat
-        if measuredChrome > 0 && measuredList > 0 {
-            intended = measuredChrome + measuredList
-        } else {
-            intended = computeIntendedHeight()
-        }
-        // Cap growth at "from current top edge of window down to bottom of
-        // visible screen area (above Dock)". Past that, the ScrollView handles
-        // overflow.
-        let currentTop = window.frame.origin.y + window.frame.height
-        let screen = window.screen ?? NSScreen.main ?? NSScreen.screens.first
-        let bottomLimit = (screen?.visibleFrame.minY ?? 0) + 8
-        let maxAvailable = max(240, currentTop - bottomLimit)
-        let targetH = min(intended, maxAvailable)
+        var targetH = min(contentHeight, maxAvailableHeight(window))
+        if let cap = userMaxHeight { targetH = min(targetH, cap) }
+        targetH = max(targetH, window.minSize.height)
 
+        let currentTop = window.frame.maxY
         let delta = targetH - window.frame.height
         guard abs(delta) > 1 else { return }   // already the right height
         var frame = window.frame
@@ -242,6 +320,13 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         // options, assigning the controller below resizes the window to the
         // content's ideal width — silently throwing away the stored width.
         hosting.sizingOptions = []
+        // The window is .titled + .fullSizeContentView, so AppKit reports the
+        // (invisible) titlebar as a safe-area inset and SwiftUI would push all
+        // content ~28pt down — but our measured content height doesn't
+        // include that inset, so the window ends up too short and the last
+        // row is cropped behind a scrollbar. We lay out from the very top
+        // instead; ContentView reserves its own 22pt strip for the close button.
+        hosting.safeAreaRegions = []
         win.contentViewController = hosting
         // Re-apply the stored width after the controller is attached (belt and
         // suspenders — the assignment above can still nudge the frame).
@@ -270,22 +355,43 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     nonisolated func windowDidBecomeKey(_ notification: Notification) {
         let target = notification.object as? NSWindow
         Task { @MainActor [weak self] in
-            guard let self, let target, target === self.window else { return }
-            // Second safety net for fit-on-show: this fires reliably every time the
+            guard let self, let target else { return }
+            // Second safety net for fit-on-show: this fires reliably every time a
             // window appears, even if the async dispatch above somehow missed.
-            self.fitWindowHeightToContent()
+            if target === self.window {
+                self.fitWindowHeightToContent()
+            } else if target === self.portfolioWindow {
+                self.fitPortfolioWindowToContent()
+            }
         }
     }
 
     nonisolated func windowDidEndLiveResize(_ notification: Notification) {
         let target = notification.object as? NSWindow
         Task { @MainActor [weak self] in
-            guard let self, let target, target === self.window else { return }
-            // Width changes get persisted; height gets snapped back to content
-            // (the user can't manually make the window taller than content needs —
-            // any extra height would be void space, which is what we're avoiding).
-            UserDefaults.standard.set(Double(target.frame.width), forKey: Self.widthKey)
-            self.fitWindowHeightToContent()
+            guard let self, let target else { return }
+            // The user's height is respected — never snapped back. If it's
+            // shorter than the content it becomes the persistent cap (the
+            // list scrolls). If it's at least the content height, the cap is
+            // cleared and the window trims any void space below the content.
+            let h = target.frame.height
+            if target === self.window {
+                UserDefaults.standard.set(Double(target.frame.width), forKey: Self.widthKey)
+                if h >= self.contentHeight - 1 {
+                    self.userMaxHeight = nil
+                    self.fitWindowHeightToContent()
+                } else {
+                    self.userMaxHeight = h
+                }
+            } else if target === self.portfolioWindow {
+                guard let needed = self.portfolioNeededFrameHeight(target) else { return }
+                if h >= needed - 1 {
+                    self.portfolioUserMaxHeight = nil
+                    self.fitPortfolioWindowToContent()
+                } else {
+                    self.portfolioUserMaxHeight = h
+                }
+            }
         }
     }
 

@@ -9,6 +9,9 @@ threshold-based price alerts — without taking up a Dock icon or main window.
 
 - **Menubar ticker** — your top token's symbol + live price always visible
 - **Searchable watchlist** — type a ticker (e.g. `ETH`), pick from results, done
+- **Rearrange & sort** — drag rows to reorder (watchlist and portfolio), or
+  sort by name / symbol / price / % change (/ value in the portfolio) from
+  the ↕ menu; the menubar shows whichever token is on top
 - **Per-token charts** — inline 1H / 24H / 7D / 30D / 90D / 1Y / ALL line
   charts, hover for exact date + price near the cursor
 - **Timeframe-labelled % change** — `7D +2.34%` under every price, following
@@ -19,7 +22,9 @@ threshold-based price alerts — without taking up a Dock icon or main window.
   chart and collapsible per-holding value charts; holdings are stored
   AES-256-GCM encrypted with the key in your login Keychain
 - **Expand / collapse charts individually** — window auto-fits the natural
-  content height (grows on expand up to screen height, shrinks on collapse)
+  content height (grows on expand down to the screen bottom, shrinks on
+  collapse). Drag it shorter and that height sticks as a cap (list scrolls);
+  drag it to full content height to go back to auto-fit
 - **Price alerts** — set high / low thresholds per token; the bot fires a
   macOS notification when the price crosses, then re-arms once it moves back
 - **Configurable refresh interval** — 1 / 5 / 15 / 30 min, with CMC usage notes
@@ -98,6 +103,7 @@ crypto-menubar/
 │   ├── TokenStore.swift                # @ObservableObject state + persistence
 │   ├── PortfolioStore.swift            # Holdings, value series alignment, encrypted persistence
 │   ├── SecureStore.swift               # AES-GCM + Keychain key + portfolio file IO
+│   ├── Reorder.swift                   # Drag-and-drop row reordering + sort menu
 │   ├── CMCClient.swift                 # CoinMarketCap REST client
 │   ├── BinanceClient.swift             # Binance klines (primary chart source)
 │   ├── CoinGeckoClient.swift           # Fallback charts + Demo-key support + cache
@@ -123,9 +129,10 @@ State lives in `UserDefaults` under bundle id `io.github.devkadji.cryptomenubar`
 | `refreshInterval.v1`, `requestThrottle.v1` | Settings sliders |
 | `coingeckoIdCache.v1`, `coingeckoHistoryCache.v1` | CMC↔CoinGecko slug mapping + chart cache |
 | `chartTimeframes.v1` | Per-token chart timeframe (drives the % badge) |
+| `sortOrder.v1`, `portfolioSort.v1` | Sort mode of the watchlist / portfolio (`manual` = drag order) |
 | `portfolioTimeframe.v1`, `portfolioHoldingTimeframes.v1`, `portfolioExpanded.v1`, `portfolioHideValues.v1` | Portfolio window UI state (timeframes, expanded rows, privacy toggle — no amounts) |
-| `CryptoMenubarMainWindow.width.v1` | Main window width (height is fitted to content) |
-| `NSWindow Frame CryptoMenubarPortfolioWindow` | Portfolio window frame (AppKit autosave) |
+| `CryptoMenubarMainWindow.width.v1`, `CryptoMenubarMainWindow.maxHeight.v1` | Main window width; user height cap (0 = auto-fit) |
+| `NSWindow Frame CryptoMenubarPortfolioWindow`, `CryptoMenubarPortfolioWindow.maxHeight.v1` | Portfolio window frame (AppKit autosave); user height cap (0 = auto-fit) |
 
 The portfolio itself (which tokens, how much) is **not** in UserDefaults. It
 is written to `~/Library/Application Support/CryptoMenubar/portfolio.v1.enc`

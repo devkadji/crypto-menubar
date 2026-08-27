@@ -1,6 +1,39 @@
 # Changelog
 
-## v2.3 (beta) — 2026-08-27
+## v2.4 — 2026-08-27
+
+- **Drag-and-drop reordering** in the watchlist and the portfolio. Grab a
+  row anywhere outside a button / the amount field and drop it onto another
+  token's block (its chart counts too); the list re-flows live under the
+  cursor. Context menu adds "Move to top / bottom". Manual order persists —
+  the watchlist in UserDefaults as before, the portfolio inside the
+  encrypted file.
+- **Sort menu** (↕ in each header): Manual · Name · Symbol · Price ·
+  % change, plus **Value** in the portfolio. Live sorts re-order as quotes
+  refresh; ties and missing quotes keep their manual order. Dragging a row
+  while a sort is active bakes the shown order in and switches back to
+  Manual, so the drop never snaps back.
+- The menubar ticker now shows the **top token as displayed** — sorting by
+  price puts your biggest coin in the menubar.
+- **Window height you can actually control.** The main window still fits
+  its content when charts expand/collapse or tokens come and go (growing
+  down to the bottom of the screen, then scrolling) — but a manual resize
+  is now respected instead of snapped back. Drag it shorter and that height
+  becomes a persistent cap (the list scrolls; later expansions grow only up
+  to it). Drag it to its full content height or beyond to clear the cap and
+  return to pure auto-fit. Also fixed the root cause of the permanent
+  scrollbar + cropped last row: the invisible titlebar's safe-area inset was
+  pushing the content down ~28 pt without being counted in the fitted
+  height. The screen-bottom limit is now taken from the
+  display under the window's top edge, so on multi-display setups the
+  window no longer runs off the bottom of a shorter screen.
+- **Portfolio window fits its content too** — same rules: grows as holdings
+  are added or their charts expanded (down to the screen bottom), shrinks
+  when they collapse, a manual shrink sticks as a cap, dragging to full
+  content height returns to auto-fit.
+
+
+## v2.3 — 2026-08-27
 
 - **Timeframe-labelled % change.** The figure under each price now reads
   `7D +2.34%` instead of a bare `+2.34%`, and it follows the token's chart

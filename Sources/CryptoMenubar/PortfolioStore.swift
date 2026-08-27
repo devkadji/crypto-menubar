@@ -67,6 +67,13 @@ final class PortfolioStore: ObservableObject {
     @Published var hideValues: Bool {
         didSet { UserDefaults.standard.set(hideValues, forKey: Self.hideValuesKey) }
     }
+    @Published var sortOrder: ListSort {
+        didSet { UserDefaults.standard.set(sortOrder.rawValue, forKey: Self.sortOrderKey) }
+    }
+    // Rendered heights reported by PortfolioView (same PreferenceKey scheme
+    // as the main window) — StatusBarController fits the window to them.
+    @Published var measuredChromeHeight: CGFloat = 0
+    @Published var measuredListHeight: CGFloat = 0
 
     // Derived series for the current timeframe. `totalSeries` is Σ amount×price
     // on a shared time grid; `tokenSeries[id]` is amount×price for one token on
@@ -88,6 +95,7 @@ final class PortfolioStore: ObservableObject {
     private static let expandedKey = "portfolioExpanded.v1"
     private static let hideValuesKey = "portfolioHideValues.v1"
     private static let holdingTimeframesKey = "portfolioHoldingTimeframes.v1"
+    private static let sortOrderKey = "portfolioSort.v1"
 
     init() {
         let tfRaw = UserDefaults.standard.string(forKey: Self.timeframeKey) ?? ""
@@ -99,6 +107,7 @@ final class PortfolioStore: ObservableObject {
             self.expandedIds = []
         }
         self.hideValues = UserDefaults.standard.bool(forKey: Self.hideValuesKey)
+        self.sortOrder = ListSort(rawValue: UserDefaults.standard.string(forKey: Self.sortOrderKey) ?? "") ?? .manual
         if let data = UserDefaults.standard.data(forKey: Self.holdingTimeframesKey),
            let decoded = try? JSONDecoder().decode([Int: Timeframe].self, from: data) {
             self.holdingTimeframes = decoded
@@ -227,11 +236,28 @@ final class PortfolioStore: ObservableObject {
         return any ? sum : nil
     }
 
-    /// Holdings sorted by live value (largest first); unknown values last.
-    var sortedHoldings: [Holding] {
-        holdings.sorted { a, b in
-            (value(of: a) ?? -1) > (value(of: b) ?? -1)
+    /// Holdings in the order the list shows them (manual order or live sort).
+    var displayedHoldings: [Holding] {
+        sortOrder.apply(holdings,
+                        name: { $0.token.name },
+                        symbol: { $0.token.symbol },
+                        price: { store?.quotes[$0.id]?.price },
+                        change: { change(for: $0)?.percent },
+                        value: { value(of: $0) })
+    }
+
+    /// Drag-and-drop reorder (see TokenStore.moveToken). Manual order is
+    /// part of the encrypted file, so it persists like everything else.
+    func moveHolding(id: Int, before targetId: Int) {
+        guard id != targetId else { return }
+        if sortOrder != .manual {
+            holdings = displayedHoldings
+            sortOrder = .manual
         }
+        guard let from = holdings.firstIndex(where: { $0.id == id }),
+              let to = holdings.firstIndex(where: { $0.id == targetId }) else { return }
+        holdings.move(fromOffsets: IndexSet(integer: from), toOffset: to > from ? to + 1 : to)
+        persist()
     }
 
     /// Change of the total over the selected timeframe. Series-based when the

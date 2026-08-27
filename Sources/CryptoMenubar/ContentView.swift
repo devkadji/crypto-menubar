@@ -1,6 +1,7 @@
 import SwiftUI
 import Charts
 import AppKit
+import UniformTypeIdentifiers
 
 // SwiftUI PreferenceKey used to bubble the *actual rendered height* of the
 // chrome (header + search + dividers + top padding) and of the token list
@@ -88,6 +89,9 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
+        // Belt and suspenders with hosting.safeAreaRegions = [] — never let the
+        // titlebar inset shift the layout (see StatusBarController.makeWindow).
+        .ignoresSafeArea()
         .onPreferenceChange(ChromeHeightKey.self) { h in
             store.measuredChromeHeight = h
         }
@@ -111,6 +115,9 @@ struct HeaderView: View {
         HStack {
             Text("Crypto Menubar").font(.headline)
             Spacer()
+            SortMenu(selection: $store.sortOrder,
+                     options: [.manual, .name, .symbol, .price, .change])
+
             Button {
                 NotificationCenter.default.post(name: .openPortfolioWindow, object: nil)
             } label: {
@@ -242,10 +249,11 @@ struct AddTokenView: View {
 struct TokenListView: View {
     @EnvironmentObject var store: TokenStore
     @State private var alertTokenId: Int? = nil    // which token's alert sheet is open
+    @State private var draggingId: Int? = nil      // row being drag-reordered
 
     var body: some View {
         VStack(spacing: 0) {
-            ForEach(store.tokens) { token in
+            ForEach(store.displayedTokens) { token in
                 let isExpanded = store.expandedTokenIds.contains(token.id)
                 VStack(spacing: 0) {
                     TokenRow(
@@ -254,10 +262,19 @@ struct TokenListView: View {
                         isExpanded: isExpanded,
                         onAlertTap: { alertTokenId = token.id }
                     )
+                    // Drag the row (not the chart — it has its own pan gesture)
+                    // to rearrange; dropping onto any part of another token's
+                    // block, chart included, moves it there.
+                    .reorderable(id: token.id, draggingId: $draggingId) { dragged, onto in
+                        store.moveToken(id: dragged, before: onto)
+                    }
                     if isExpanded {
                         ChartSection(token: token)
                             .padding(.vertical, 4)
                             .background(Color.gray.opacity(0.04))
+                            .onDrop(of: [.text], delegate: ReorderDropDelegate(
+                                rowId: token.id, draggingId: $draggingId,
+                                move: { store.moveToken(id: $0, before: $1) }))
                     }
                 }
                 .contextMenu {
@@ -265,12 +282,18 @@ struct TokenListView: View {
                         store.toggleExpanded(token.id)
                     }
                     Button("Price alerts…") { alertTokenId = token.id }
+                    Divider()
+                    Button("Move to top") { moveToEdge(token, top: true) }
+                    Button("Move to bottom") { moveToEdge(token, top: false) }
+                    Divider()
                     Button("Remove from list", role: .destructive) {
                         store.remove(token)
                     }
                 }
             }
         }
+        // Dropping outside any row: just end the drag.
+        .onDrop(of: [.text], isTargeted: nil) { _ in draggingId = nil; return true }
         .sheet(item: Binding(
             get: { alertTokenId.flatMap { id in store.tokens.first { $0.id == id } } },
             set: { _ in alertTokenId = nil }
@@ -278,6 +301,12 @@ struct TokenListView: View {
             AlertConfigSheet(token: token)
                 .environmentObject(store)
         }
+    }
+
+    private func moveToEdge(_ token: Token, top: Bool) {
+        let shown = store.displayedTokens
+        guard let edge = top ? shown.first : shown.last, edge.id != token.id else { return }
+        store.moveToken(id: token.id, before: edge.id)
     }
 }
 

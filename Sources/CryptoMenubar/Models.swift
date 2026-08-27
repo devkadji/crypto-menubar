@@ -216,3 +216,60 @@ enum Timeframe: String, CaseIterable, Identifiable, Codable {
         }
     }
 }
+
+/// Row ordering for the watchlist and the portfolio. `manual` = the order
+/// the user arranged by drag-and-drop; the others re-sort live as quotes
+/// change (name/symbol ascending, numeric ones descending).
+enum ListSort: String, CaseIterable, Identifiable, Codable {
+    case manual, name, symbol, price, change, value
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .manual: return "Manual (drag to reorder)"
+        case .name:   return "Name A→Z"
+        case .symbol: return "Symbol A→Z"
+        case .price:  return "Price, high → low"
+        case .change: return "% change, high → low"
+        case .value:  return "Value, high → low"
+        }
+    }
+
+    /// Stable sort — ties (and missing numbers) keep their manual order;
+    /// items without a quote sink to the bottom for numeric sorts.
+    func apply<T>(_ items: [T],
+                  name: (T) -> String,
+                  symbol: (T) -> String,
+                  price: (T) -> Double?,
+                  change: (T) -> Double?,
+                  value: (T) -> Double?) -> [T] {
+        guard self != .manual else { return items }
+        let indexed = Array(items.enumerated())
+        func numeric(_ key: (T) -> Double?) -> [T] {
+            indexed.sorted { a, b in
+                let x = key(a.element), y = key(b.element)
+                switch (x, y) {
+                case let (x?, y?) where x != y: return x > y
+                case (.some, .none): return true
+                case (.none, .some): return false
+                default: return a.offset < b.offset
+                }
+            }.map(\.element)
+        }
+        func text(_ key: (T) -> String) -> [T] {
+            indexed.sorted { a, b in
+                let c = key(a.element).localizedCaseInsensitiveCompare(key(b.element))
+                return c == .orderedSame ? a.offset < b.offset : c == .orderedAscending
+            }.map(\.element)
+        }
+        switch self {
+        case .manual: return items
+        case .name:   return text(name)
+        case .symbol: return text(symbol)
+        case .price:  return numeric(price)
+        case .change: return numeric(change)
+        case .value:  return numeric(value)
+        }
+    }
+}

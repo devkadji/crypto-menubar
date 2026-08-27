@@ -52,6 +52,9 @@ final class TokenStore: ObservableObject {
     // First/last price of whatever each EXPANDED chart is currently drawing.
     // Written by ChartSection; cleared when the chart collapses.
     @Published var chartStats: [Int: ChartStats] = [:]
+    @Published var sortOrder: ListSort {
+        didSet { UserDefaults.standard.set(sortOrder.rawValue, forKey: Self.sortOrderKey) }
+    }
 
     let portfolio = PortfolioStore()
 
@@ -71,6 +74,7 @@ final class TokenStore: ObservableObject {
     private static let alertsKey = "alerts.v1"
     private static let refreshIntervalKey = "refreshInterval.v1"
     private static let chartTimeframesKey = "chartTimeframes.v1"
+    private static let sortOrderKey = "sortOrder.v1"
     static let defaultRefreshSeconds: Double = 300   // 5 min — fits CMC free tier
 
     // Default watchlist: just Bitcoin.
@@ -137,6 +141,8 @@ final class TokenStore: ObservableObject {
             return [:]
         }()
 
+        self.sortOrder = ListSort(rawValue: UserDefaults.standard.string(forKey: Self.sortOrderKey) ?? "") ?? .manual
+
         portfolio.attach(self)
 
         Task { [self] in
@@ -181,8 +187,34 @@ final class TokenStore: ObservableObject {
         return HistoryResult(points: pts, source: .coingecko)
     }
 
+    /// Tokens in the order the list shows them (manual order or live sort).
+    var displayedTokens: [Token] {
+        sortOrder.apply(tokens,
+                        name: { $0.name },
+                        symbol: { $0.symbol },
+                        price: { quotes[$0.id]?.price },
+                        change: { priceChange(for: $0.id)?.percent },
+                        value: { _ in nil })
+    }
+
+    /// Drag-and-drop: put `id` where `targetId` currently sits. If a live
+    /// sort is active, the displayed order is baked in first and the list
+    /// switches back to Manual so the drop sticks.
+    func moveToken(id: Int, before targetId: Int) {
+        guard id != targetId else { return }
+        if sortOrder != .manual {
+            tokens = displayedTokens
+            sortOrder = .manual
+        }
+        guard let from = tokens.firstIndex(where: { $0.id == id }),
+              let to = tokens.firstIndex(where: { $0.id == targetId }) else { return }
+        tokens.move(fromOffsets: IndexSet(integer: from), toOffset: to > from ? to + 1 : to)
+    }
+
     var primaryDisplay: String {
-        guard let first = tokens.first else { return "—" }
+        // The menubar shows the TOP token as displayed (so "sort by price"
+        // puts your biggest coin in the menubar).
+        guard let first = displayedTokens.first else { return "—" }
         if let q = quotes[first.id] {
             return "\(first.symbol) \(formatPrice(q.price))"
         }
