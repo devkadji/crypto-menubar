@@ -55,6 +55,13 @@ final class TokenStore: ObservableObject {
     @Published var sortOrder: ListSort {
         didSet { UserDefaults.standard.set(sortOrder.rawValue, forKey: Self.sortOrderKey) }
     }
+    // Tokens CMC reported as no longer tracked in the last refresh
+    // (watchlist + portfolio), and what we found out about them.
+    @Published var inactiveTokenIds: Set<Int> = []
+    @Published var tokenNotices: [Int: TokenNotice] {
+        didSet { persistNotices() }
+    }
+    private var noticeLookupInFlight: Set<Int> = []
 
     let portfolio = PortfolioStore()
 
@@ -75,6 +82,8 @@ final class TokenStore: ObservableObject {
     private static let refreshIntervalKey = "refreshInterval.v1"
     private static let chartTimeframesKey = "chartTimeframes.v1"
     private static let sortOrderKey = "sortOrder.v1"
+    private static let noticesKey = "tokenNotices.v1"
+    private static let noticeRetryAfter: TimeInterval = 7 * 86400   // re-check a cached notice weekly
     static let defaultRefreshSeconds: Double = 300   // 5 min — fits CMC free tier
 
     // Default watchlist: just Bitcoin.
@@ -142,6 +151,12 @@ final class TokenStore: ObservableObject {
         }()
 
         self.sortOrder = ListSort(rawValue: UserDefaults.standard.string(forKey: Self.sortOrderKey) ?? "") ?? .manual
+        if let data = UserDefaults.standard.data(forKey: Self.noticesKey),
+           let decoded = try? JSONDecoder().decode([Int: TokenNotice].self, from: data) {
+            self.tokenNotices = decoded
+        } else {
+            self.tokenNotices = [:]
+        }
 
         portfolio.attach(self)
 
@@ -239,6 +254,12 @@ final class TokenStore: ObservableObject {
         }
     }
 
+    private func persistNotices() {
+        if let data = try? JSONEncoder().encode(tokenNotices) {
+            UserDefaults.standard.set(data, forKey: Self.noticesKey)
+        }
+    }
+
     private func persistChartTimeframes() {
         if let data = try? JSONEncoder().encode(chartTimeframes) {
             UserDefaults.standard.set(data, forKey: Self.chartTimeframesKey)
@@ -295,6 +316,8 @@ final class TokenStore: ObservableObject {
         // Keep the quote if the portfolio still holds this token.
         if !portfolio.quoteIds.contains(token.id) {
             quotes.removeValue(forKey: token.id)
+            inactiveTokenIds.remove(token.id)
+            tokenNotices.removeValue(forKey: token.id)
         }
     }
 
@@ -317,12 +340,74 @@ final class TokenStore: ObservableObject {
         guard !ids.isEmpty, !apiKey.isEmpty else { return }
         do {
             let result = try await cmc.quotes(for: ids)
-            quotes = result
+            quotes = result.quotes
+            inactiveTokenIds = result.inactiveIds
             lastError = nil
             checkAlerts()
+            lookupNotices(for: result.inactiveIds)
         } catch {
             lastError = (error as? LocalizedError)?.errorDescription ?? "\(error)"
         }
+    }
+
+    // MARK: - No-longer-tracked tokens: notice + successor
+
+    func notice(for tokenId: Int) -> TokenNotice? {
+        inactiveTokenIds.contains(tokenId) ? tokenNotices[tokenId] : nil
+    }
+
+    /// For tokens CMC stopped tracking, fetch its notice once (cached a week)
+    /// and resolve the successor coin if the notice links to one. Costs 1–2
+    /// CMC credits per dead token, once — nothing on the normal path.
+    private func lookupNotices(for inactive: Set<Int>) {
+        let due = inactive.filter { id in
+            guard !noticeLookupInFlight.contains(id) else { return false }
+            guard let cached = tokenNotices[id] else { return true }
+            return Date().timeIntervalSince(cached.checkedAt) > Self.noticeRetryAfter
+        }
+        guard !due.isEmpty else { return }
+        noticeLookupInFlight.formUnion(due)
+        Task { [weak self] in
+            guard let self else { return }
+            defer { Task { @MainActor in self.noticeLookupInFlight.subtract(due) } }
+            guard let infos = try? await self.cmc.info(ids: Array(due)) else { return }
+            for id in due {
+                let raw = infos[id]?.notice ?? ""
+                var entry = TokenNotice(notice: CMCClient.plainNotice(raw), successor: nil, checkedAt: Date())
+                if let slug = CMCClient.successorSlug(in: raw),
+                   let succ = try? await self.cmc.info(slug: slug), succ.token.id != id {
+                    entry.successor = succ.token
+                }
+                self.tokenNotices[id] = entry
+            }
+        }
+    }
+
+    /// Swap a dead token for its successor everywhere it appears — watchlist
+    /// position, expanded state and chart timeframe carry over; price alerts
+    /// are dropped (thresholds for a different asset are meaningless). If
+    /// the successor is already listed, the old one is simply removed.
+    func replace(_ old: Token, with new: Token) {
+        if let i = tokens.firstIndex(where: { $0.id == old.id }) {
+            if tokens.contains(where: { $0.id == new.id }) {
+                tokens.remove(at: i)
+            } else {
+                tokens[i] = new
+                if expandedTokenIds.contains(old.id) { expandedTokenIds.insert(new.id) }
+                if let tf = chartTimeframes[old.id] { chartTimeframes[new.id] = tf }
+            }
+        }
+        expandedTokenIds.remove(old.id)
+        chartTimeframes.removeValue(forKey: old.id)
+        chartStats.removeValue(forKey: old.id)
+        alerts.removeValue(forKey: old.id)
+        portfolio.replace(oldId: old.id, with: new)
+        if !portfolio.quoteIds.contains(old.id) {
+            quotes.removeValue(forKey: old.id)
+            inactiveTokenIds.remove(old.id)
+            tokenNotices.removeValue(forKey: old.id)
+        }
+        Task { await refresh() }
     }
 
     /// Fire notifications for any token whose price has just crossed a threshold.

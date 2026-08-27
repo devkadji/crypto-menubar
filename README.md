@@ -25,6 +25,10 @@ threshold-based price alerts — without taking up a Dock icon or main window.
   content height (grows on expand down to the screen bottom, shrinks on
   collapse). Drag it shorter and that height sticks as a cap (list scrolls);
   drag it to full content height to go back to auto-fit
+- **Renamed / delisted tokens** — a coin CoinMarketCap stops tracking gets a
+  ⚠️ "not tracked" badge plus CMC's own notice; if the notice names a
+  successor (MATIC → POL), one click replaces it in the watchlist and the
+  portfolio
 - **Price alerts** — set high / low thresholds per token; the bot fires a
   macOS notification when the price crosses, then re-arms once it moves back
 - **Configurable refresh interval** — 1 / 5 / 15 / 30 min, with CMC usage notes
@@ -130,6 +134,7 @@ State lives in `UserDefaults` under bundle id `io.github.devkadji.cryptomenubar`
 | `coingeckoIdCache.v1`, `coingeckoHistoryCache.v1` | CMC↔CoinGecko slug mapping + chart cache |
 | `chartTimeframes.v1` | Per-token chart timeframe (drives the % badge) |
 | `sortOrder.v1`, `portfolioSort.v1` | Sort mode of the watchlist / portfolio (`manual` = drag order) |
+| `tokenNotices.v1` | Cached CMC notices + successors for no-longer-tracked tokens (re-checked weekly) |
 | `portfolioTimeframe.v1`, `portfolioHoldingTimeframes.v1`, `portfolioExpanded.v1`, `portfolioHideValues.v1` | Portfolio window UI state (timeframes, expanded rows, privacy toggle — no amounts) |
 | `CryptoMenubarMainWindow.width.v1`, `CryptoMenubarMainWindow.maxHeight.v1` | Main window width; user height cap (0 = auto-fit) |
 | `NSWindow Frame CryptoMenubarPortfolioWindow`, `CryptoMenubarPortfolioWindow.maxHeight.v1` | Portfolio window frame (AppKit autosave); user height cap (0 = auto-fit) |

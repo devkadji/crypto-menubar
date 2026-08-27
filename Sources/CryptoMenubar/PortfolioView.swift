@@ -352,8 +352,14 @@ struct HoldingRow: View {
                 }
 
                 VStack(alignment: .trailing, spacing: 2) {
-                    Text(portfolio.hideValues ? "••••" : (value.map(formatPrice) ?? "—"))
-                        .bold().monospacedDigit()
+                    if value == nil, store.inactiveTokenIds.contains(holding.id) {
+                        Label("not tracked", systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption).foregroundColor(.orange)
+                            .help("CoinMarketCap no longer tracks this token — see the note below the row. Not counted in the total.")
+                    } else {
+                        Text(portfolio.hideValues ? "••••" : (value.map(formatPrice) ?? "—"))
+                            .bold().monospacedDigit()
+                    }
                     HStack(spacing: 6) {
                         if let s = share, !portfolio.hideValues {
                             Text(String(format: "%.1f%%", s))
@@ -395,11 +401,22 @@ struct HoldingRow: View {
                 if !store.tokens.contains(where: { $0.id == holding.id }) {
                     Button("Add to watchlist") { store.add(holding.token) }
                 }
+                if let succ = store.tokenNotices[holding.id]?.successor, store.inactiveTokenIds.contains(holding.id) {
+                    Button("Replace with \(succ.symbol) (\(succ.name))") { store.replace(holding.token, with: succ) }
+                }
                 Button("Remove from portfolio", role: .destructive) {
                     portfolio.remove(id: holding.id)
                 }
             }
 
+            if store.inactiveTokenIds.contains(holding.id) {
+                InactiveNoticeView(
+                    token: holding.token,
+                    notice: store.tokenNotices[holding.id],
+                    onReplace: { store.replace(holding.token, with: $0) },
+                    onRemove: { portfolio.remove(id: holding.id) }
+                )
+            }
             if isExpanded {
                 HoldingChart(holding: holding)
                     .padding(.vertical, 4)

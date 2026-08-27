@@ -215,6 +215,35 @@ final class PortfolioStore: ObservableObject {
         rebuildSeries()
     }
 
+    /// Swap a dead token for its successor, keeping the amount (MATIC → POL
+    /// was 1:1; the notice is shown next to the button so other ratios can
+    /// be checked). If the successor is already held, the amounts are merged.
+    func replace(oldId: Int, with new: Token) {
+        guard let i = holdings.firstIndex(where: { $0.id == oldId }) else { return }
+        let amount = holdings[i].amount
+        if let j = holdings.firstIndex(where: { $0.id == new.id }) {
+            holdings[j].amount += amount
+            holdings.remove(at: i)
+        } else {
+            holdings[i] = Holding(token: new, amount: amount)
+            if expandedIds.contains(oldId) { expandedIds.insert(new.id) }
+            if let tf = holdingTimeframes[oldId] { holdingTimeframes[new.id] = tf }
+        }
+        expandedIds.remove(oldId)
+        holdingTimeframes.removeValue(forKey: oldId)
+        rawHistories.removeValue(forKey: oldId)
+        seriesSources.removeValue(forKey: oldId)
+        excludedIds.removeAll { $0 == oldId }
+        overrideHistories.removeValue(forKey: oldId)
+        overrideSeries.removeValue(forKey: oldId)
+        overrideSources.removeValue(forKey: oldId)
+        overrideFailed.remove(oldId)
+        overrideLoading.remove(oldId)
+        persist()
+        fetchHistories(for: [new.id])
+        if holdingTimeframes[new.id] != nil { fetchOverride(for: new.id) }
+    }
+
     func toggleExpanded(_ id: Int) {
         if expandedIds.contains(id) { expandedIds.remove(id) } else { expandedIds.insert(id) }
     }

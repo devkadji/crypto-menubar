@@ -11,7 +11,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-VERSION="2.4"
+VERSION="2.5"
 DIST_NAME="CryptoMenubar-${VERSION}"
 DIST_DIR="dist/${DIST_NAME}"
 

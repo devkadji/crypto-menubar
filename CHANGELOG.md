@@ -1,5 +1,27 @@
 # Changelog
 
+## v2.5 — 2026-08-28
+
+- **Fix: all prices stuck at "—" when one token is no longer tracked by
+  CoinMarketCap.** CMC returns `price: null` (with `is_active: 0`) for
+  tokens it has stopped tracking — e.g. MATIC after the Polygon → POL
+  migration. The quote decoder treated `price` as required, so that single
+  null failed the whole response and every refresh was discarded
+  ("Decoding error: The data couldn't be read because it is missing").
+  Such tokens are now skipped; everything else keeps updating.
+- **"No longer tracked" handling.** A token CMC has dropped shows a ⚠️
+  *not tracked* badge and a note under its row with CMC's own notice
+  (fetched once and cached for a week — 1–2 API credits per dead token,
+  nothing otherwise). When the notice names a successor coin, a
+  **Replace with POL**-style button (also in the context menu) swaps it in
+  place: watchlist position, expanded state and chart timeframe carry
+  over; in the portfolio the amount carries over (merged if the successor
+  is already held); price alerts are cleared. Token search labels such
+  coins "no longer tracked" so a dead ticker isn't added by accident.
+- Why no CoinGecko price fallback for such tokens: CoinGecko still quotes
+  `matic-network` ~17 % away from POL — a stale-but-plausible number is
+  worse than an honest "—".
+
 ## v2.4 — 2026-08-27
 
 - **Drag-and-drop reordering** in the watchlist and the portfolio. Grab a

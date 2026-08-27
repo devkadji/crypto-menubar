@@ -273,3 +273,20 @@ enum ListSort: String, CaseIterable, Identifiable, Codable {
         }
     }
 }
+
+/// What we know about a token CoinMarketCap has stopped tracking (`is_active`
+/// = 0 in the quotes response): CMC's own notice text and, when the notice
+/// links to a successor coin (e.g. MATIC → POL), that successor. Cached so
+/// the info lookup runs once per token, not every refresh.
+struct TokenNotice: Codable, Equatable {
+    var notice: String?        // plain-text first sentences of CMC's notice
+    var successor: Token?      // resolved from the notice's coinmarketcap.com link
+    var checkedAt: Date
+}
+
+/// Result of one quotes refresh: prices for tracked tokens + the ids CMC
+/// reports as no longer tracked (no price).
+struct QuotesResult {
+    var quotes: [Int: Quote]
+    var inactiveIds: Set<Int>
+}

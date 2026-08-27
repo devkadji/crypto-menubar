@@ -176,7 +176,7 @@ struct AddTokenView: View {
     var onSelect: ((Token) -> Void)? = nil
     @State private var query = ""
     @State private var searching = false
-    @State private var results: [Token] = []
+    @State private var results: [CMCClient.SearchResult] = []
     @State private var errorMessage: String? = nil
 
     var body: some View {
@@ -192,7 +192,8 @@ struct AddTokenView: View {
             }
             .padding(.horizontal, 12)
 
-            ForEach(results.prefix(5)) { token in
+            ForEach(results.prefix(5)) { result in
+                let token = result.token
                 Button {
                     if let onSelect { onSelect(token) } else { store.add(token) }
                     results = []
@@ -201,6 +202,11 @@ struct AddTokenView: View {
                     HStack {
                         Text(token.symbol).bold()
                         Text(token.name).foregroundColor(.secondary)
+                        if !result.isActive {
+                            Text("no longer tracked")
+                                .font(.caption2).foregroundColor(.orange)
+                                .help("CoinMarketCap stopped tracking this coin — it will show no price. If it was renamed, the row will offer its successor.")
+                        }
                         Spacer()
                         Image(systemName: "plus.circle")
                     }
@@ -268,6 +274,14 @@ struct TokenListView: View {
                     .reorderable(id: token.id, draggingId: $draggingId) { dragged, onto in
                         store.moveToken(id: dragged, before: onto)
                     }
+                    if store.inactiveTokenIds.contains(token.id) {
+                        InactiveNoticeView(
+                            token: token,
+                            notice: store.tokenNotices[token.id],
+                            onReplace: { store.replace(token, with: $0) },
+                            onRemove: { store.remove(token) }
+                        )
+                    }
                     if isExpanded {
                         ChartSection(token: token)
                             .padding(.vertical, 4)
@@ -282,6 +296,9 @@ struct TokenListView: View {
                         store.toggleExpanded(token.id)
                     }
                     Button("Price alerts…") { alertTokenId = token.id }
+                    if let succ = store.tokenNotices[token.id]?.successor, store.inactiveTokenIds.contains(token.id) {
+                        Button("Replace with \(succ.symbol) (\(succ.name))") { store.replace(token, with: succ) }
+                    }
                     Divider()
                     Button("Move to top") { moveToEdge(token, top: true) }
                     Button("Move to bottom") { moveToEdge(token, top: false) }
@@ -353,8 +370,13 @@ struct TokenRow: View {
                         timeframe: store.chartTimeframe(for: token.id),
                         change: store.priceChange(for: token.id)
                     )
+                } else if store.inactiveTokenIds.contains(token.id) {
+                    Label("not tracked", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundColor(.orange)
+                        .help("CoinMarketCap no longer tracks this token — see the note below the row.")
                 } else {
                     Text("—").foregroundColor(.secondary)
+                        .help("Waiting for the next price refresh")
                 }
             }
 
@@ -371,6 +393,69 @@ struct TokenRow: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .contentShape(Rectangle())
+    }
+}
+
+// MARK: - "No longer tracked" note under a row
+
+/// Shown under a token CoinMarketCap has stopped tracking: CMC's own notice
+/// (e.g. the MATIC → POL migration text) and, when the notice names a
+/// successor coin, a one-click Replace. Used by both the watchlist and the
+/// portfolio.
+struct InactiveNoticeView: View {
+    let token: Token
+    let notice: TokenNotice?
+    let onReplace: (Token) -> Void
+    let onRemove: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .top, spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundColor(.orange)
+                    .font(.caption)
+                Text(message)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 8) {
+                if let succ = notice?.successor {
+                    Button {
+                        onReplace(succ)
+                    } label: {
+                        Label("Replace with \(succ.symbol)", systemImage: "arrow.right.circle")
+                    }
+                    .controlSize(.small)
+                    .help("Swap \(token.symbol) for \(succ.symbol) (\(succ.name)) — position, chart settings and portfolio amount carry over; price alerts are cleared.")
+                }
+                Button(role: .destructive) {
+                    onRemove()
+                } label: {
+                    Label("Remove", systemImage: "trash")
+                }
+                .controlSize(.small)
+                if notice == nil {
+                    ProgressView().controlSize(.mini)
+                    Text("checking CoinMarketCap…").font(.caption2).foregroundColor(.secondary)
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.leading, 30)     // align with the symbol/name column
+        .padding(.bottom, 6)
+    }
+
+    private var message: String {
+        var m = "CoinMarketCap no longer tracks \(token.symbol)."
+        if let n = notice?.notice, !n.isEmpty {
+            m += " " + n
+        } else if let succ = notice?.successor {
+            m += " It appears to have been replaced by \(succ.symbol) (\(succ.name))."
+        } else if notice != nil {
+            m += " No migration notice was found — it may simply be delisted."
+        }
+        return m
     }
 }
 
