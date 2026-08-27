@@ -70,11 +70,19 @@ FIRST-RUN SETUP
 USING IT
 --------
 - Type a ticker (ETH, SOL, BNB, ...) in the search field to add tokens.
-- Each token row shows current price + 24h change.
-- Click the chevron to expand/collapse a chart (with 7D/30D/90D/1Y).
+- Each token row shows current price + % change, labelled with the
+  timeframe it refers to (e.g. "7D +2.3%"). It follows the chart's
+  timeframe.
+- Click the chevron to expand/collapse a chart (1H / 24H / 7D / 30D /
+  90D / 1Y / ALL). Pinch or Option+scroll to zoom, drag to pan.
 - Hover the chart to see exact price + date.
 - Click the 🔔 bell on any row to set price alerts (above / below).
   When the price crosses a threshold, you get a macOS notification.
+- Click the pie-chart button for the Portfolio tracker: add tokens by
+  ticker, enter how much you hold, and see total value + charts.
+  Holdings are stored encrypted on your Mac (key in your login
+  Keychain). macOS asks once "CryptoMenubar wants to use your
+  confidential information" — click Always Allow.
 
 WHY THE "UNIDENTIFIED DEVELOPER" WARNING?
 -----------------------------------------
