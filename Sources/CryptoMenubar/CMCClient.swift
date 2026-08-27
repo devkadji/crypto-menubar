@@ -100,7 +100,11 @@ actor CMCClient {
                 struct QuoteWrap: Decodable {
                     struct USD: Decodable {
                         let price: Double
+                        let percent_change_1h: Double?
                         let percent_change_24h: Double?
+                        let percent_change_7d: Double?
+                        let percent_change_30d: Double?
+                        let percent_change_90d: Double?
                     }
                     let USD: USD
                 }
@@ -113,9 +117,14 @@ actor CMCClient {
             let r = try JSONDecoder().decode(Response.self, from: data)
             var out: [Int: Quote] = [:]
             for (_, item) in r.data {
+                let u = item.quote.USD
                 out[item.id] = Quote(
-                    price: item.quote.USD.price,
-                    percentChange24h: item.quote.USD.percent_change_24h ?? 0
+                    price: u.price,
+                    percentChange1h: u.percent_change_1h,
+                    percentChange24h: u.percent_change_24h ?? 0,
+                    percentChange7d: u.percent_change_7d,
+                    percentChange30d: u.percent_change_30d,
+                    percentChange90d: u.percent_change_90d
                 )
             }
             return out

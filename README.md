@@ -9,8 +9,15 @@ threshold-based price alerts — without taking up a Dock icon or main window.
 
 - **Menubar ticker** — your top token's symbol + live price always visible
 - **Searchable watchlist** — type a ticker (e.g. `ETH`), pick from results, done
-- **Per-token charts** — inline 7D / 30D / 90D / 1Y line charts, hover for
-  exact date + price near the cursor
+- **Per-token charts** — inline 1H / 24H / 7D / 30D / 90D / 1Y / ALL line
+  charts, hover for exact date + price near the cursor
+- **Timeframe-labelled % change** — `7D +2.34%` under every price, following
+  that token's chart timeframe (chart-derived when expanded, CMC's figure when
+  collapsed)
+- **Portfolio tracker** — separate window with ticker search, editable
+  holdings, total value + change over the selected timeframe, a total-value
+  chart and collapsible per-holding value charts; holdings are stored
+  AES-256-GCM encrypted with the key in your login Keychain
 - **Expand / collapse charts individually** — window auto-fits the natural
   content height (grows on expand up to screen height, shrinks on collapse)
 - **Price alerts** — set high / low thresholds per token; the bot fires a
@@ -27,7 +34,7 @@ threshold-based price alerts — without taking up a Dock icon or main window.
 | What | Source | Why |
 |---|---|---|
 | Token search + name resolution | **CoinMarketCap** (free Basic plan) | Authoritative ticker → id/name mapping, market-cap ranked |
-| Current prices + 24h % change | **CoinMarketCap** | Reliable for any listed asset |
+| Current prices + 1H/24H/7D/30D/90D % change | **CoinMarketCap** | Reliable for any listed asset |
 | Historical charts (primary) | **Binance** public `klines` API | No key, no rate limits in practice |
 | Historical charts (fallback) | **CoinGecko** public API (optional Demo key) | Used when a token isn't on Binance OR Binance's data is stale (>48h old → e.g. XMR after their 2024 delisting) |
 
@@ -85,8 +92,12 @@ crypto-menubar/
 ├── Sources/CryptoMenubar/
 │   ├── CryptoMenubarApp.swift          # @main + AppDelegate boot
 │   ├── StatusBarController.swift       # NSStatusItem + custom resizable NSWindow
-│   ├── ContentView.swift               # All SwiftUI views (rows, charts, sheets)
+│   ├── ContentView.swift               # Main-window SwiftUI views (rows, chart section, sheets)
+│   ├── InteractiveLineChart.swift      # Shared zoom/pan/hover chart + % badge + caption
+│   ├── PortfolioView.swift             # Portfolio window views
 │   ├── TokenStore.swift                # @ObservableObject state + persistence
+│   ├── PortfolioStore.swift            # Holdings, value series alignment, encrypted persistence
+│   ├── SecureStore.swift               # AES-GCM + Keychain key + portfolio file IO
 │   ├── CMCClient.swift                 # CoinMarketCap REST client
 │   ├── BinanceClient.swift             # Binance klines (primary chart source)
 │   ├── CoinGeckoClient.swift           # Fallback charts + Demo-key support + cache
@@ -111,7 +122,26 @@ State lives in `UserDefaults` under bundle id `io.github.devkadji.cryptomenubar`
 | `cmcAPIKey.v1`, `coingeckoDemoKey.v1` | API keys (move to Keychain for hardened distribution) |
 | `refreshInterval.v1`, `requestThrottle.v1` | Settings sliders |
 | `coingeckoIdCache.v1`, `coingeckoHistoryCache.v1` | CMC↔CoinGecko slug mapping + chart cache |
-| `NSWindow Frame CryptoMenubarMainWindow` | Window size (AppKit autosave) |
+| `chartTimeframes.v1` | Per-token chart timeframe (drives the % badge) |
+| `portfolioTimeframe.v1`, `portfolioHoldingTimeframes.v1`, `portfolioExpanded.v1`, `portfolioHideValues.v1` | Portfolio window UI state (timeframes, expanded rows, privacy toggle — no amounts) |
+| `CryptoMenubarMainWindow.width.v1` | Main window width (height is fitted to content) |
+| `NSWindow Frame CryptoMenubarPortfolioWindow` | Portfolio window frame (AppKit autosave) |
+
+The portfolio itself (which tokens, how much) is **not** in UserDefaults. It
+is written to `~/Library/Application Support/CryptoMenubar/portfolio.v1.enc`
+(mode 0600) as `"CMPF1" + AES-256-GCM(nonce ‖ ciphertext ‖ tag)`, with the
+header used as additional authenticated data. The random 256-bit key is a
+generic-password item in the login Keychain
+(service `io.github.devkadji.cryptomenubar`, account
+`portfolio-encryption-key`). The file is only read when the Portfolio window
+is opened, and the key is only created on the first save.
+
+Because the app is ad-hoc signed, the Keychain ties the key to the exact
+binary that created it: after **every rebuild** the first portfolio access
+shows a "CryptoMenubar wants to use your confidential information stored in
+… in your keychain" dialog — click **Always Allow**. Released builds see it
+once per update at most. If you click Deny, the window shows "Portfolio
+locked" with a Try-again button (and a destructive Reset as last resort).
 
 ## Restrictions
 

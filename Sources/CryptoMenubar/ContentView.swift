@@ -2,29 +2,79 @@ import SwiftUI
 import Charts
 import AppKit
 
+// SwiftUI PreferenceKey used to bubble the *actual rendered height* of the
+// chrome (header + search + dividers + top padding) and of the token list
+// (inside the ScrollView) up to ContentView. From there it's pushed to the
+// store, where StatusBarController observes and resizes the window.
+//
+// This is much more reliable than estimating heights with constants — the
+// constants drift every time SwiftUI's default padding/spacing changes.
+struct ChromeHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+struct ListHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+extension Notification.Name {
+    /// Posted by the header's portfolio button; StatusBarController opens the window.
+    static let openPortfolioWindow = Notification.Name("io.github.devkadji.cryptomenubar.openPortfolio")
+}
+
 struct ContentView: View {
     @EnvironmentObject var store: TokenStore
     @State private var showSettings = false
 
     var body: some View {
         VStack(spacing: 0) {
-            // Reserve space for the borderless window's traffic-light buttons
-            // (positioned at top-left of the window over our content).
-            Color.clear.frame(height: 22)
-            HeaderView(showSettings: $showSettings)
-            Divider()
+            // Chrome (everything above the scrollable token list) — its size is
+            // measured by a GeometryReader background so we know exactly how
+            // much vertical space it consumes.
+            VStack(spacing: 0) {
+                // Reserve space for the borderless window's traffic-light buttons.
+                Color.clear.frame(height: 22)
+                HeaderView(showSettings: $showSettings)
+                Divider()
+                if !store.apiKey.isEmpty {
+                    AddTokenView().padding(.vertical, 6)
+                    Divider()
+                }
+            }
+            .background(
+                GeometryReader { geo in
+                    Color.clear.preference(
+                        key: ChromeHeightKey.self,
+                        value: geo.size.height
+                    )
+                }
+            )
 
             if store.apiKey.isEmpty {
                 APIKeyPrompt(showSettings: $showSettings)
             } else {
-                AddTokenView()
-                    .padding(.vertical, 6)
-                Divider()
                 ScrollView {
                     TokenListView()
+                        // .fixedSize(vertical: true) forces SwiftUI to lay out
+                        // the list at its IDEAL (natural) height instead of
+                        // collapsing it to the ScrollView's visible bounds —
+                        // which is what the background GeometryReader needs
+                        // to read in order to report the true content height.
+                        .fixedSize(horizontal: false, vertical: true)
+                        .background(
+                            GeometryReader { geo in
+                                Color.clear.preference(
+                                    key: ListHeightKey.self,
+                                    value: geo.size.height
+                                )
+                            }
+                        )
                 }
-                // The window is user-resizable (drag any edge), so the ScrollView
-                // just fills the available vertical space.
                 .frame(maxHeight: .infinity)
             }
 
@@ -37,6 +87,12 @@ struct ContentView: View {
                     .padding(.vertical, 6)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
+        }
+        .onPreferenceChange(ChromeHeightKey.self) { h in
+            store.measuredChromeHeight = h
+        }
+        .onPreferenceChange(ListHeightKey.self) { h in
+            store.measuredListHeight = h
         }
         .sheet(isPresented: $showSettings) {
             SettingsView()
@@ -55,6 +111,14 @@ struct HeaderView: View {
         HStack {
             Text("Crypto Menubar").font(.headline)
             Spacer()
+            Button {
+                NotificationCenter.default.post(name: .openPortfolioWindow, object: nil)
+            } label: {
+                Image(systemName: "chart.pie")
+            }
+            .buttonStyle(.borderless)
+            .help("Portfolio tracker")
+
             Button { Task { await store.refresh() } } label: {
                 Image(systemName: "arrow.clockwise")
             }
@@ -99,6 +163,10 @@ struct APIKeyPrompt: View {
 
 struct AddTokenView: View {
     @EnvironmentObject var store: TokenStore
+    var placeholder: String = "Add token by ticker (e.g. ETH, SOL)"
+    /// Where a picked token goes. Defaults to the watchlist; the Portfolio
+    /// window passes its own handler.
+    var onSelect: ((Token) -> Void)? = nil
     @State private var query = ""
     @State private var searching = false
     @State private var results: [Token] = []
@@ -108,7 +176,7 @@ struct AddTokenView: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Image(systemName: "magnifyingglass").foregroundColor(.secondary)
-                TextField("Add token by ticker (e.g. ETH, SOL)", text: $query)
+                TextField(placeholder, text: $query)
                     .textFieldStyle(.plain)
                     .onSubmit { runSearch() }
                 if searching {
@@ -119,7 +187,7 @@ struct AddTokenView: View {
 
             ForEach(results.prefix(5)) { token in
                 Button {
-                    store.add(token)
+                    if let onSelect { onSelect(token) } else { store.add(token) }
                     results = []
                     query = ""
                 } label: {
@@ -249,9 +317,13 @@ struct TokenRow: View {
             VStack(alignment: .trailing, spacing: 2) {
                 if let q = quote {
                     Text(formatPrice(q.price))
-                    Text(String(format: "%@%.2f%%", q.percentChange24h >= 0 ? "+" : "", q.percentChange24h))
-                        .font(.caption)
-                        .foregroundColor(q.percentChange24h >= 0 ? .green : .red)
+                    // "% over which window?" — labelled with the chart timeframe
+                    // (persisted per token) and sourced from the chart itself
+                    // when it's expanded, CMC's matching field when collapsed.
+                    ChangeBadge(
+                        timeframe: store.chartTimeframe(for: token.id),
+                        change: store.priceChange(for: token.id)
+                    )
                 } else {
                     Text("—").foregroundColor(.secondary)
                 }
@@ -273,34 +345,28 @@ struct TokenRow: View {
     }
 }
 
-// MARK: - Chart section (pops up when hovering a token row)
+// MARK: - Chart section (expanded under a token row)
 
 struct ChartSection: View {
     let token: Token
-    @State private var timeframe: Timeframe = .d30
     @State private var history: [PricePoint] = []
     @State private var source: ChartSource? = nil
     @State private var loading = false
     @State private var errorMessage: String? = nil
     @State private var loadTask: Task<Void, Never>? = nil
-    @State private var hoverPoint: PricePoint? = nil
-    @State private var xZoom: CGFloat = 1.0           // 1.0 = full range; pinch out to zoom in
-    @State private var zoomAtGestureStart: CGFloat = 1.0
-    @State private var scrollLeadingEdge: Date = .distantPast
-    // Pinch-zoom anchor — the date under the cursor at gesture start. The
-    // visible window slides during zoom so this date stays at the same
-    // fractional position across the plot width.
-    @State private var zoomAnchorDate: Date? = nil
-    @State private var zoomAnchorFraction: Double = 0.5
-    // Drag-to-pan state — captured at gesture start so we pan relative to it.
-    @State private var panStartLeadingEdge: Date? = nil
-    @State private var isChartHovered = false         // cursor currently over this chart
-    @State private var scrollMonitor: Any? = nil      // NSEvent monitor for Option+scroll zoom
     @State private var autoRefreshTask: Task<Void, Never>? = nil
     @State private var lastFetchedAt: Date? = nil     // when history was last pulled
     @EnvironmentObject var store: TokenStore
 
-    private static let maxZoom: CGFloat = 30.0       // cap so we don't show <2 points
+    // Timeframe lives in the store (persisted per token) so the row's %
+    // badge can follow it even while the chart is collapsed.
+    private var timeframe: Timeframe { store.chartTimeframe(for: token.id) }
+    private var timeframeBinding: Binding<Timeframe> {
+        Binding(
+            get: { store.chartTimeframe(for: token.id) },
+            set: { store.setChartTimeframe($0, for: token.id) }
+        )
+    }
 
     var body: some View {
         VStack(spacing: 6) {
@@ -308,15 +374,14 @@ struct ChartSection: View {
                 Text("\(token.name) (\(token.symbol))")
                     .font(.subheadline).bold()
                 Spacer()
-                Picker("", selection: $timeframe) {
+                Picker("", selection: timeframeBinding) {
                     ForEach(Timeframe.allCases) { Text($0.rawValue).tag($0) }
                 }
                 .pickerStyle(.segmented)
-                // 7 options need more room than the old 4. Push the title to its
-                // own line above (handled by the surrounding HStack collapsing).
                 .frame(minWidth: 280)
                 .labelsHidden()
                 .controlSize(.small)
+                .help("Chart timeframe — also sets the window for the % change shown in the row")
             }
             .padding(.horizontal, 12)
 
@@ -330,7 +395,7 @@ struct ChartSection: View {
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 12)
                 } else if !history.isEmpty {
-                    chartView
+                    InteractiveLineChart(points: history)
                         .frame(height: 140)
                         .padding(.horizontal, 12)
                 } else {
@@ -342,36 +407,30 @@ struct ChartSection: View {
             // Source + freshness caption — shows which provider served this
             // chart and when it was last polled.
             if let source = source, let last = history.last {
-                sourceCaption(source: source, last: last.timestamp, fetchedAt: lastFetchedAt)
+                SourceCaption(text: "via \(source.label)", last: last.timestamp, fetchedAt: lastFetchedAt)
             }
         }
         .onAppear {
             loadHistory()
-            installScrollZoomMonitor()
             startAutoRefresh()
         }
         .onDisappear {
-            if let m = scrollMonitor { NSEvent.removeMonitor(m) }
-            scrollMonitor = nil
             autoRefreshTask?.cancel()
             autoRefreshTask = nil
+            loadTask?.cancel()
+            // Collapsed → the row badge falls back to CMC's figure.
+            store.chartStats.removeValue(forKey: token.id)
         }
         .onChange(of: token.id) { _, _ in
-            hoverPoint = nil
-            resetZoom()
             loadHistory()
         }
         .onChange(of: timeframe) { _, _ in
-            hoverPoint = nil
-            resetZoom()
             loadHistory()
         }
     }
 
     // Self-contained refresh loop — re-fetches this chart's history every
     // `refreshIntervalSeconds`, independent of the store's quote-refresh cycle.
-    // Runs only while the chart is expanded (started in onAppear, cancelled in
-    // onDisappear).
     private func startAutoRefresh() {
         autoRefreshTask?.cancel()
         autoRefreshTask = Task { @MainActor in
@@ -391,322 +450,20 @@ struct ChartSection: View {
         let tf = timeframe
         guard let result = try? await store.history(for: token, timeframe: tf) else { return }
         guard tf == timeframe else { return }   // user switched away mid-fetch
+        apply(result, timeframe: tf)
+    }
+
+    @MainActor
+    private func apply(_ result: HistoryResult, timeframe tf: Timeframe) {
         history = result.points
         source = result.source
         lastFetchedAt = Date()
-        reanchorRightEdge()
-    }
-
-    // Mouse users have no pinch gesture — let Option+scroll-wheel zoom instead.
-    // A local NSEvent monitor observes scroll events without sitting in the
-    // hit-test path (so it doesn't block the hover tooltip). It only acts when
-    // Option is held and the cursor is over THIS chart.
-    private func installScrollZoomMonitor() {
-        guard scrollMonitor == nil else { return }
-        let hovered = $isChartHovered
-        let zoom = $xZoom
-        let zoomStart = $zoomAtGestureStart
-        let scroll = $scrollLeadingEdge
-        let hist = $history
-        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
-            // Mouse wheel only (trackpad has pinch); Option held; over this chart.
-            guard event.modifierFlags.contains(.option),
-                  !event.hasPreciseScrollingDeltas,
-                  hovered.wrappedValue else {
-                return event
-            }
-            let delta = event.scrollingDeltaY
-            guard delta != 0 else { return nil }
-            // Scroll up → zoom in. Clamp per-event delta so one notch is gentle.
-            let clamped = min(max(delta, -3), 3)
-            let factor = 1.0 + clamped * 0.08
-            let newZoom = max(1.0, min(Self.maxZoom, zoom.wrappedValue * factor))
-            zoom.wrappedValue = newZoom
-            zoomStart.wrappedValue = newZoom
-            // Re-anchor the visible window's right edge to the latest point.
-            let h = hist.wrappedValue
-            if let first = h.first?.timestamp, let last = h.last?.timestamp, last > first {
-                let visible = last.timeIntervalSince(first) / Double(newZoom)
-                scroll.wrappedValue = last.addingTimeInterval(-visible)
-            }
-            return nil   // consume — don't let the list scroll
-        }
-    }
-
-    // Length of the visible X window in seconds. zoom=1 shows the full series;
-    // zoom=2 shows half; etc. (Used by .chartXVisibleDomain — Swift Charts'
-    // first-class API for fixed-window panning/zooming. The whole series is
-    // always fed to the chart; only the visible WINDOW changes, so marks never
-    // re-render or fade out during zoom changes.)
-    private var visibleDuration: TimeInterval {
-        guard let first = history.first?.timestamp,
-              let last = history.last?.timestamp,
-              last > first else { return 86400 }
-        return last.timeIntervalSince(first) / Double(xZoom)
-    }
-
-    // Points inside the ACTUAL visible window [scrollLeadingEdge, +visibleDuration].
-    // Used by yDomain (Y-axis fit) and nearest() (hover-snap). Previously this
-    // anchored to the right edge of the data — which broke after panning, because
-    // yDomain/hover were looking at the rightmost candles instead of the ones
-    // actually drawn on screen.
-    private var visiblePoints: [PricePoint] {
-        guard !history.isEmpty else { return history }
-        let start = scrollLeadingEdge
-        let end = start.addingTimeInterval(visibleDuration)
-        let inWindow = history.filter { $0.timestamp >= start && $0.timestamp <= end }
-        // Defensive fallback: if scrollLeadingEdge is still .distantPast (i.e.
-        // the chart hasn't been anchored yet, e.g. mid-load), return everything
-        // so yDomain doesn't degenerate to 0…1.
-        return inWindow.isEmpty ? history : inWindow
-    }
-
-    // Fit the Y-axis to the data inside the current X window, with 8% padding.
-    // Recomputes as the user zooms so the chart always uses its full vertical
-    // extent.
-    private var yDomain: ClosedRange<Double> {
-        let prices = visiblePoints.map(\.price)
-        guard let lo = prices.min(), let hi = prices.max() else { return 0...1 }
-        if hi == lo {
-            let pad = max(abs(hi) * 0.01, 0.0001)
-            return (lo - pad)...(hi + pad)
-        }
-        let pad = (hi - lo) * 0.08
-        return (lo - pad)...(hi + pad)
-    }
-
-    private var zoomGesture: some Gesture {
-        MagnifyGesture(minimumScaleDelta: 0)
-            .onChanged { value in
-                // First frame of this gesture: capture the date the cursor is
-                // over as the zoom anchor (from the hover state we already track).
-                if zoomAnchorDate == nil, let hp = hoverPoint,
-                   let first = history.first?.timestamp,
-                   let last = history.last?.timestamp,
-                   last > first {
-                    let total = last.timeIntervalSince(first)
-                    let curVisible = total / Double(xZoom)
-                    let pos = hp.timestamp.timeIntervalSince(scrollLeadingEdge) / curVisible
-                    zoomAnchorDate = hp.timestamp
-                    zoomAnchorFraction = max(0, min(1, pos))
-                }
-                let proposed = zoomAtGestureStart * value.magnification
-                let new = max(1.0, min(Self.maxZoom, proposed))
-                withTransaction(Transaction(animation: nil)) {
-                    xZoom = new
-                    repositionForZoom()
-                }
-            }
-            .onEnded { _ in
-                zoomAtGestureStart = xZoom
-                zoomAnchorDate = nil
-            }
-    }
-
-    // DragGesture for panning the visible window. Defined inside chartOverlay
-    // so the closure can capture `plotWidth` (which we need to convert pixel
-    // drag → time). Three-finger trackpad drag (via macOS Accessibility) is
-    // delivered as a regular click-and-drag and triggers this too.
-    private func panGesture(plotWidth: CGFloat) -> some Gesture {
-        DragGesture(minimumDistance: 4)
-            .onChanged { value in
-                if panStartLeadingEdge == nil {
-                    panStartLeadingEdge = scrollLeadingEdge
-                }
-                guard plotWidth > 0,
-                      let start = panStartLeadingEdge else { return }
-                // translation.width > 0 (drag right) → visible window shifts
-                // LEFT in time (earlier data appears).
-                let secPerPoint = visibleDuration / Double(plotWidth)
-                let deltaSec = -Double(value.translation.width) * secPerPoint
-                var newLE = start.addingTimeInterval(deltaSec)
-                if let first = history.first?.timestamp,
-                   let last = history.last?.timestamp {
-                    if newLE < first { newLE = first }
-                    let maxLE = last.addingTimeInterval(-visibleDuration)
-                    if newLE > maxLE { newLE = maxLE }
-                }
-                withTransaction(Transaction(animation: nil)) {
-                    scrollLeadingEdge = newLE
-                }
-            }
-            .onEnded { _ in
-                panStartLeadingEdge = nil
-            }
-    }
-
-    private func resetZoom() {
-        xZoom = 1.0
-        zoomAtGestureStart = 1.0
-        zoomAnchorDate = nil
-        reanchorRightEdge()
-    }
-
-    // Reposition during zoom: keep the cursor's anchor date at the same
-    // fractional X position. Falls back to right-edge anchor when no cursor
-    // anchor was captured (e.g. scroll-wheel zoom with no hover).
-    private func repositionForZoom() {
-        guard let first = history.first?.timestamp,
-              let last = history.last?.timestamp,
-              last > first else { return }
-        let total = last.timeIntervalSince(first)
-        let newVisible = total / Double(xZoom)
-
-        if let anchor = zoomAnchorDate {
-            var newLE = anchor.addingTimeInterval(-zoomAnchorFraction * newVisible)
-            if newLE < first { newLE = first }
-            let maxLE = last.addingTimeInterval(-newVisible)
-            if newLE > maxLE { newLE = maxLE }
-            scrollLeadingEdge = newLE
+        if let f = result.points.first, let l = result.points.last {
+            store.chartStats[token.id] = ChartStats(
+                timeframe: tf, firstPrice: f.price, lastPrice: l.price, source: result.source
+            )
         } else {
-            scrollLeadingEdge = last.addingTimeInterval(-newVisible)
-        }
-    }
-
-    // Right-edge anchor — only used on initial load + manual zoom reset now.
-    private func reanchorRightEdge() {
-        guard let last = history.last?.timestamp else { return }
-        scrollLeadingEdge = last.addingTimeInterval(-visibleDuration)
-    }
-
-    @ViewBuilder
-    private var chartView: some View {
-        let domain = yDomain
-        // Feed Chart ALL history; the visible window is controlled below via
-        // chartXVisibleDomain + chartScrollPosition (Swift Charts' first-class
-        // windowing API). This avoids per-frame data mutation during zoom,
-        // which was leaving brief rendering gaps in the curve.
-        Chart {
-            ForEach(history) { p in
-                // Anchor the area's bottom to the visible domain's lower bound,
-                // not to y=0. Without this the fill extends down to 0 (off-screen
-                // since we've restricted the Y axis) and bleeds into rows below.
-                AreaMark(
-                    x: .value("Date", p.timestamp),
-                    yStart: .value("Bottom", domain.lowerBound),
-                    yEnd: .value("Price", p.price)
-                )
-                .foregroundStyle(
-                    LinearGradient(
-                        colors: [.accentColor.opacity(0.35), .accentColor.opacity(0.0)],
-                        startPoint: .top, endPoint: .bottom
-                    )
-                )
-                LineMark(
-                    x: .value("Date", p.timestamp),
-                    y: .value("Price", p.price)
-                )
-                .foregroundStyle(Color.accentColor)
-                .interpolationMethod(.monotone)
-            }
-
-            // Hover crosshair: vertical rule + highlighted point + price/date annotation.
-            if let hp = hoverPoint {
-                RuleMark(x: .value("Date", hp.timestamp))
-                    .foregroundStyle(Color.secondary.opacity(0.45))
-                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 2]))
-                PointMark(
-                    x: .value("Date", hp.timestamp),
-                    y: .value("Price", hp.price)
-                )
-                .foregroundStyle(Color.accentColor)
-                .symbolSize(70)
-                .annotation(
-                    // .automatic lets Swift Charts pick top vs. bottom based on
-                    // where there's room — avoids the leftmost-curve occlusion
-                    // we saw when .top forced the tooltip into the data band.
-                    position: .automatic,
-                    alignment: .center,
-                    spacing: 6,
-                    overflowResolution: .init(x: .fit(to: .chart), y: .fit(to: .chart))
-                ) {
-                    HoverTooltip(point: hp)
-                }
-            }
-        }
-        .chartYScale(domain: domain)
-        // Visible window: only this slice of the X axis is shown at any moment.
-        // The chart still has access to all of history, so marks render once
-        // and aren't dropped/recreated as the window changes.
-        .chartXVisibleDomain(length: visibleDuration)
-        .chartScrollPosition(x: $scrollLeadingEdge)
-        .chartScrollableAxes(.horizontal)
-        // Belt and suspenders: even if the gesture transaction misses a frame,
-        // tell Charts not to animate any state derived from the zoom value.
-        .animation(nil, value: xZoom)
-        .chartYAxis {
-            // .automatic(desiredCount:) sometimes gives ceil+1 ticks; cap at 4
-            // explicitly so labels never get crammed at the top/bottom edges.
-            AxisMarks(position: .leading, values: .automatic(desiredCount: 4))
-        }
-        // Previously had `.clipped()` here as a safety net for an AreaMark bug
-        // (gradient overflowing the chart frame). That's now fixed by anchoring
-        // AreaMark to `domain.lowerBound`, so clipping isn't needed — and removing
-        // it stops the topmost/bottom Y-axis label from being cut off.
-        .chartOverlay { proxy in
-            GeometryReader { geo in
-                Rectangle()
-                    .fill(.clear)
-                    .contentShape(Rectangle())
-                    .onContinuousHover { phase in
-                        switch phase {
-                        case .active(let location):
-                            isChartHovered = true
-                            guard let plotFrame = proxy.plotFrame else { return }
-                            let origin = geo[plotFrame].origin
-                            let xInPlot = location.x - origin.x
-                            if let date: Date = proxy.value(atX: xInPlot, as: Date.self) {
-                                hoverPoint = nearest(to: date)
-                            }
-                        case .ended:
-                            isChartHovered = false
-                            hoverPoint = nil
-                        }
-                    }
-                    // Pinch lives INSIDE the overlay's hit area so it competes
-                    // for the same events the overlay rect was eating.
-                    .simultaneousGesture(zoomGesture)
-                    // Drag-to-pan. Uses the plot width from the proxy to map
-                    // pixel drag → time. Triggers on three-finger drag too
-                    // (macOS Accessibility delivers it as a normal click-drag).
-                    .gesture(
-                        panGesture(plotWidth: (proxy.plotFrame.map { geo[$0].width } ?? 0))
-                    )
-                    .onTapGesture(count: 2) { resetZoom() }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func sourceCaption(source: ChartSource, last: Date, fetchedAt: Date?) -> some View {
-        // Dot color reflects how fresh the most-recent data point is:
-        // green ≤2h, yellow ≤24h, red >24h.
-        let age = Date().timeIntervalSince(last)
-        let color: Color = age <= 2 * 3600 ? .green
-            : (age <= 24 * 3600 ? .yellow : .red)
-        // "↻ HH:mm" is when we last polled — advances every refresh interval,
-        // so it's a visible confirmation the chart is auto-updating.
-        let updated = fetchedAt.map {
-            "↻ " + $0.formatted(.dateTime.hour().minute())
-        } ?? ""
-        HStack(spacing: 6) {
-            Circle()
-                .fill(color)
-                .frame(width: 6, height: 6)
-            Text("via \(source.label) · \(updated)")
-                .font(.caption2.monospaced())
-                .foregroundColor(.secondary)
-            Spacer()
-        }
-        .padding(.horizontal, 12)
-        .padding(.bottom, 2)
-    }
-
-    private func nearest(to date: Date) -> PricePoint? {
-        let candidates = visiblePoints.isEmpty ? history : visiblePoints
-        guard !candidates.isEmpty else { return nil }
-        return candidates.min { a, b in
-            abs(a.timestamp.timeIntervalSince(date)) < abs(b.timestamp.timeIntervalSince(date))
+            store.chartStats.removeValue(forKey: token.id)
         }
     }
 
@@ -717,21 +474,16 @@ struct ChartSection: View {
         let tok = token
         let tf = timeframe
         loadTask = Task {
-            // 250 ms debounce: if user keeps moving the cursor across tokens
-            // we cancel before this wakes up, so we don't fire a request per token.
+            // 250 ms debounce: rapid timeframe clicks cancel before this wakes
+            // up, so we don't fire a request per click.
             try? await Task.sleep(for: .milliseconds(250))
             if Task.isCancelled { return }
             do {
                 let result = try await store.history(for: tok, timeframe: tf)
                 if Task.isCancelled { return }
                 await MainActor.run {
-                    history = result.points
-                    source = result.source
-                    lastFetchedAt = Date()
+                    apply(result, timeframe: tf)
                     loading = false
-                    // Initial scroll-position anchor — without this the chart
-                    // would render with scrollLeadingEdge still at .distantPast.
-                    reanchorRightEdge()
                 }
             } catch {
                 if Task.isCancelled { return }
@@ -740,6 +492,7 @@ struct ChartSection: View {
                     history = []
                     source = nil
                     loading = false
+                    store.chartStats.removeValue(forKey: token.id)
                 }
             }
         }
@@ -784,36 +537,6 @@ struct TokenIcon: View {
                     .font(.caption2.bold())
                     .foregroundColor(.secondary)
             )
-    }
-}
-
-// MARK: - Hover tooltip (date + price near cursor)
-
-struct HoverTooltip: View {
-    let point: PricePoint
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(point.timestamp.formatted(
-                .dateTime.month(.abbreviated).day().hour().minute()
-            ))
-            .font(.caption2)
-            .foregroundColor(.secondary)
-            Text(formatPrice(point.price))
-                .font(.caption.bold())
-                .monospacedDigit()
-        }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 4)
-        .background(
-            RoundedRectangle(cornerRadius: 4)
-                .fill(Color(NSColor.controlBackgroundColor))
-                .shadow(color: .black.opacity(0.2), radius: 2, x: 0, y: 1)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 4)
-                .stroke(Color.secondary.opacity(0.3), lineWidth: 0.5)
-        )
     }
 }
 

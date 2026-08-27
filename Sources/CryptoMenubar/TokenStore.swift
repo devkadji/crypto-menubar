@@ -38,6 +38,22 @@ final class TokenStore: ObservableObject {
         }
     }
     @Published var lastError: String? = nil
+    // Live SwiftUI measurements pushed in via PreferenceKeys from ContentView.
+    // StatusBarController observes these to size the window to actual content
+    // (instead of relying on hardcoded estimates that drifted from reality).
+    @Published var measuredChromeHeight: CGFloat = 0
+    @Published var measuredListHeight: CGFloat = 0
+    // Per-token chart timeframe (persisted). The row's % badge follows this
+    // even while the chart is collapsed, so it's always clear what window the
+    // number refers to.
+    @Published var chartTimeframes: [Int: Timeframe] {
+        didSet { persistChartTimeframes() }
+    }
+    // First/last price of whatever each EXPANDED chart is currently drawing.
+    // Written by ChartSection; cleared when the chart collapses.
+    @Published var chartStats: [Int: ChartStats] = [:]
+
+    let portfolio = PortfolioStore()
 
     let cmc = CMCClient()
     let binance = BinanceClient()
@@ -54,6 +70,7 @@ final class TokenStore: ObservableObject {
     private static let throttleKey = "requestThrottle.v1"
     private static let alertsKey = "alerts.v1"
     private static let refreshIntervalKey = "refreshInterval.v1"
+    private static let chartTimeframesKey = "chartTimeframes.v1"
     static let defaultRefreshSeconds: Double = 300   // 5 min — fits CMC free tier
 
     // Default watchlist: just Bitcoin.
@@ -96,6 +113,13 @@ final class TokenStore: ObservableObject {
         let storedInterval = UserDefaults.standard.double(forKey: Self.refreshIntervalKey)
         self.refreshIntervalSeconds = storedInterval > 0 ? storedInterval : Self.defaultRefreshSeconds
 
+        if let data = UserDefaults.standard.data(forKey: Self.chartTimeframesKey),
+           let decoded = try? JSONDecoder().decode([Int: Timeframe].self, from: data) {
+            self.chartTimeframes = decoded
+        } else {
+            self.chartTimeframes = [:]
+        }
+
         let savedIdCache: [String: String] = {
             if let data = UserDefaults.standard.data(forKey: Self.coingeckoIdCacheKey),
                let decoded = try? JSONDecoder().decode([String: String].self, from: data) {
@@ -112,6 +136,8 @@ final class TokenStore: ObservableObject {
             }
             return [:]
         }()
+
+        portfolio.attach(self)
 
         Task { [self] in
             await cmc.setAPIKey(self.apiKey)
@@ -181,6 +207,38 @@ final class TokenStore: ObservableObject {
         }
     }
 
+    private func persistChartTimeframes() {
+        if let data = try? JSONEncoder().encode(chartTimeframes) {
+            UserDefaults.standard.set(data, forKey: Self.chartTimeframesKey)
+        }
+    }
+
+    // MARK: - Chart timeframe + % change
+
+    func chartTimeframe(for tokenId: Int) -> Timeframe {
+        chartTimeframes[tokenId] ?? .d30
+    }
+
+    func setChartTimeframe(_ tf: Timeframe, for tokenId: Int) {
+        guard chartTimeframes[tokenId] != tf else { return }
+        chartTimeframes[tokenId] = tf
+    }
+
+    /// The % change shown under a token's price. Uses the expanded chart's
+    /// own data when it's drawn for the selected timeframe; otherwise CMC's
+    /// matching field (1H/24H/7D/30D/90D). nil for 1Y/ALL while collapsed.
+    func priceChange(for tokenId: Int) -> PriceChange? {
+        let tf = chartTimeframe(for: tokenId)
+        if expandedTokenIds.contains(tokenId),
+           let s = chartStats[tokenId], s.timeframe == tf, let p = s.percentChange {
+            return PriceChange(timeframe: tf, percent: p, source: .chart(s.source))
+        }
+        if let q = quotes[tokenId], let p = q.percentChange(for: tf) {
+            return PriceChange(timeframe: tf, percent: p, source: .cmc)
+        }
+        return nil
+    }
+
     /// Set or clear the alert for a token. Passing nil (or an inactive alert) removes it.
     func setAlert(_ alert: PriceAlert?, for tokenId: Int) {
         if let alert, alert.isActive {
@@ -199,8 +257,13 @@ final class TokenStore: ObservableObject {
 
     func remove(_ token: Token) {
         tokens.removeAll { $0.id == token.id }
-        quotes.removeValue(forKey: token.id)
         expandedTokenIds.remove(token.id)
+        chartStats.removeValue(forKey: token.id)
+        chartTimeframes.removeValue(forKey: token.id)
+        // Keep the quote if the portfolio still holds this token.
+        if !portfolio.quoteIds.contains(token.id) {
+            quotes.removeValue(forKey: token.id)
+        }
     }
 
     func toggleExpanded(_ tokenId: Int) {
@@ -216,9 +279,12 @@ final class TokenStore: ObservableObject {
     }
 
     func refresh() async {
-        guard !tokens.isEmpty, !apiKey.isEmpty else { return }
+        // One CMC call covers the watchlist AND the portfolio holdings.
+        var ids: [Int] = []
+        for id in tokens.map(\.id) + portfolio.quoteIds where !ids.contains(id) { ids.append(id) }
+        guard !ids.isEmpty, !apiKey.isEmpty else { return }
         do {
-            let result = try await cmc.quotes(for: tokens.map(\.id))
+            let result = try await cmc.quotes(for: ids)
             quotes = result
             lastError = nil
             checkAlerts()

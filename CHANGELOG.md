@@ -1,5 +1,41 @@
 # Changelog
 
+## v2.3 (beta) — 2026-08-27
+
+- **Timeframe-labelled % change.** The figure under each price now reads
+  `7D +2.34%` instead of a bare `+2.34%`, and it follows the token's chart
+  timeframe (persisted per token, default 30D). While the chart is expanded
+  the number is derived from the drawn history (first → last point, so it
+  matches the curve exactly); while collapsed it uses CoinMarketCap's own
+  1H / 24H / 7D / 30D / 90D figure. 1Y / ALL show `—` until the chart is
+  expanded. Hover the badge for the source.
+- **Portfolio tracker.** New 🥧 button in the header opens a separate
+  window: add tokens by ticker, enter how much you hold, and see the total
+  value, its change over the selected timeframe, and a total-value chart
+  (same 1H…ALL picker, same pinch/⌥-scroll zoom, pan and hover as the token
+  charts). Each holding row has an inline-editable amount, live value,
+  share of the total, and a collapsible chart of that holding's value
+  (amount × price) on the same time grid. Each expanded holding also has
+  its own timeframe picker: the top picker sets every chart, a holding's
+  picker overrides just that chart (and its row's % badge) until the top
+  picker is changed again. The 👁 toggle masks amounts, values, share,
+  chart Y-axes and captions. Holdings that aren't on Binance
+  fall back to CoinGecko like everything else; a holding with no history
+  at all is flagged and left out of the chart (but still counted in the
+  total).
+- **Encrypted portfolio storage.** Holdings are saved to
+  `~/Library/Application Support/CryptoMenubar/portfolio.v1.enc`, sealed
+  with AES-256-GCM. The key lives only in your login Keychain
+  ("Crypto Menubar — portfolio encryption key"), so the file on disk is
+  opaque to anything that can't get through the Keychain prompt. The file
+  is only read when the Portfolio window is opened. An 👁 toggle in the
+  window masks all amounts/values for screen-sharing.
+- Internals: the interactive chart is now a reusable `InteractiveLineChart`
+  view (token charts and portfolio charts share one implementation).
+  `Quote` carries all of CMC's percent-change windows; the quote refresh
+  covers watchlist + portfolio tokens in a single CMC call.
+
+
 ## v2.2 — 2026-05-27
 
 - **Cursor-anchored pinch zoom.** Pinching now keeps the date under the cursor

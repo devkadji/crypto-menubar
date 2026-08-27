@@ -9,7 +9,96 @@ struct Token: Identifiable, Codable, Hashable {
 
 struct Quote: Equatable {
     let price: Double
+    // CMC ships several look-back windows in the same quote. 24h is always
+    // present; the others are optional in the API (nil for very new listings).
+    let percentChange1h: Double?
     let percentChange24h: Double
+    let percentChange7d: Double?
+    let percentChange30d: Double?
+    let percentChange90d: Double?
+
+    init(price: Double,
+         percentChange1h: Double? = nil,
+         percentChange24h: Double,
+         percentChange7d: Double? = nil,
+         percentChange30d: Double? = nil,
+         percentChange90d: Double? = nil) {
+        self.price = price
+        self.percentChange1h = percentChange1h
+        self.percentChange24h = percentChange24h
+        self.percentChange7d = percentChange7d
+        self.percentChange30d = percentChange30d
+        self.percentChange90d = percentChange90d
+    }
+
+    /// CMC's own percent change for a chart timeframe, when it has one.
+    /// 1Y / ALL have no CMC equivalent — those are only available from chart
+    /// history (see `ChartStats`).
+    func percentChange(for tf: Timeframe) -> Double? {
+        switch tf {
+        case .h1:   return percentChange1h
+        case .h24:  return percentChange24h
+        case .d7:   return percentChange7d
+        case .d30:  return percentChange30d
+        case .d90:  return percentChange90d
+        case .d365, .all: return nil
+        }
+    }
+}
+
+/// First/last price of the history currently drawn in a token's expanded
+/// chart. Published by ChartSection so the row's % badge can show the change
+/// over exactly what the chart shows.
+struct ChartStats: Equatable {
+    let timeframe: Timeframe
+    let firstPrice: Double
+    let lastPrice: Double
+    let source: ChartSource
+
+    var percentChange: Double? {
+        guard firstPrice > 0 else { return nil }
+        return (lastPrice / firstPrice - 1) * 100
+    }
+}
+
+/// A % change plus where it came from — shown under the price in each row.
+struct PriceChange: Equatable {
+    enum Source: Equatable {
+        case chart(ChartSource)   // derived from the drawn history (first → last point)
+        case cmc                  // CoinMarketCap's percent_change_* field
+
+        var label: String {
+            switch self {
+            case .chart(let s): return "\(s.label) chart data"
+            case .cmc:          return "CoinMarketCap"
+            }
+        }
+    }
+    let timeframe: Timeframe
+    let percent: Double
+    let source: Source
+
+    /// Builds a change from a drawn series if one is available for `timeframe`,
+    /// otherwise from CMC's matching field. nil when neither is available
+    /// (e.g. 1Y/ALL with the chart collapsed).
+    static func resolve(timeframe: Timeframe,
+                        series: [PricePoint]?,
+                        seriesSource: ChartSource?,
+                        quote: Quote?) -> PriceChange? {
+        if let series, let f = series.first, let l = series.last, f.price > 0 {
+            return PriceChange(timeframe: timeframe,
+                               percent: (l.price / f.price - 1) * 100,
+                               source: .chart(seriesSource ?? .binance))
+        }
+        if let q = quote, let p = q.percentChange(for: timeframe) {
+            return PriceChange(timeframe: timeframe, percent: p, source: .cmc)
+        }
+        return nil
+    }
+}
+
+func formatPercent(_ p: Double) -> String {
+    String(format: "%@%.2f%%", p >= 0 ? "+" : "", p)
 }
 
 struct PricePoint: Identifiable {
@@ -44,7 +133,7 @@ struct PriceAlert: Codable, Equatable {
     var isActive: Bool { high != nil || low != nil }
 }
 
-enum Timeframe: String, CaseIterable, Identifiable {
+enum Timeframe: String, CaseIterable, Identifiable, Codable {
     case h1 = "1H"
     case h24 = "24H"
     case d7 = "7D"
@@ -54,6 +143,19 @@ enum Timeframe: String, CaseIterable, Identifiable {
     case all = "ALL"
 
     var id: String { rawValue }
+
+    /// Human wording for tooltips: "change over the last 7 days".
+    var changeDescription: String {
+        switch self {
+        case .h1:   return "last hour"
+        case .h24:  return "last 24 hours"
+        case .d7:   return "last 7 days"
+        case .d30:  return "last 30 days"
+        case .d90:  return "last 90 days"
+        case .d365: return "last year"
+        case .all:  return "entire available history"
+        }
+    }
 
     // ---- Binance /klines parameters ----
     // Interval × limit ≈ the time span. 60–180 candles per chart keeps it smooth.
